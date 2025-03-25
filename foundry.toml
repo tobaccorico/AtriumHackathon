@@ -9,9 +9,19 @@ fs_permissions = [{ access = "read-write", path = ".forge-snapshots/"}]
 
 solc_version = "0.8.26"
 evm_version = "cancun"
-
+fuzz_runs = 500
 via_ir = true
 optimizer = true
 optimizer_runs = 10_000_000
 
-# See more config options https://github.com/foundry-rs/foundry/tree/master/config
+bytecode_hash = "none"
+deny_warnings = false
+cbor_metadata = false
+sparse_mode = false
+build_info = true
+verbosity = 4
+
+[profile.dependencies]
+v4-core = { git = "https://github.com/uniswap/v4-core" }
+v4-periphery = { git = "https://github.com/uniswap/v4-periphery" }
+aave-v3-origin = { git = "https://github.com/aave-dao/aave-v3-origin" }

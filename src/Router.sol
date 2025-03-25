@@ -50,23 +50,18 @@ contract MO is SafeCallback, Ownable {
     using CurrencySettler for Currency;
 
     uint internal _ETH_PRICE; // TODO remove
-    event PrintDelta(int, int);
     
     PoolKey vanillaKey; IUniswapV3Pool v3Pool;
     bool internal token1isWETH; // ^
+    // for our v4 pool ETH is token1
     ISwapRouter v3Router; // fallback
-    // for our v4 pool ETH is token0
+    
     IERC20 pxETH; IERC4626 rexVault;
     IPirexETH rex; Good GD; // basket
     IERC20 USDC; WETH weth; IPool aave;
     mockToken mockETH; mockToken mockUSD;
-    
-    // mapping(address => uint) autoManaged; // TODO
-    // ^ price range handled by contract
-
     mapping(address => uint[]) positions;
     mapping(uint => SelfManaged) selfManaged;
-
     struct SelfManaged {
         address owner;
         int24 lower;
@@ -79,10 +74,11 @@ contract MO is SafeCallback, Ownable {
         uint buffer;
         int price;
     }
-
     mapping(address => viaAAVE) pledgesOneForZero;
     mapping(address => viaAAVE) pledgesZeroForOne;
-
+    mapping(address => uint) autoManaged; 
+    // ^ price range handled by contract
+    
     uint internal PENDING_ETH;
     // ^ single-sided liqudity
     // that is waiting for $
@@ -92,17 +88,17 @@ contract MO is SafeCallback, Ownable {
     uint internal POOLED_ETH;
     // these define "in-range"
     int24 internal UPPER_TICK;
-    int24 internal LOWER_TICK;
-    
+    int24 internal LOWER_TICK;    
     uint internal LAST_REPACK;
     // ^ timestamp allows us
     // to measure APY% for:
     uint internal USD_FEES;
     uint internal ETH_FEES;
+
     // _unlockCallback    
     enum Action { Swap, 
-        AddETH, RemoveETH,
-        OutsideRange, Repack
+        Repack, ModLP, 
+        OutsideRange
     } uint internal tokenId;
     // ^ always incrementing
     uint constant WAD = 1e18;
@@ -331,12 +327,12 @@ contract MO is SafeCallback, Ownable {
         } else {
             position.liq -= liquidity;
             selfManaged[id] = position;
-        }
+        } // TODO unRex
     }
 
     function deposit() isInitialised external payable { 
         (uint amount, ) = rex.deposit{value: msg.value}(address(this), true);
-        _addLiquidity(POOLED_USD, amount);
+        autoManaged[msg.sender] = amount; _addLiquidity(POOLED_USD, amount);
     }
 
     function _addLiquidity(
@@ -345,10 +341,10 @@ contract MO is SafeCallback, Ownable {
         int24 tickLower, int24 tickUpper,) = _repack(); 
         uint price = getPrice(sqrtPriceX96, false);
         (delta0, delta1) = _addLiquidityHelper(delta0, delta1, price);
-        if (delta0 > 0) {
+        if (delta0 > 0) { require(delta1 > 0, "_addLiquidity");
             BalanceDelta delta = abi.decode(poolManager.unlock(
-                abi.encode(Action.AddETH, sqrtPriceX96, delta0, 
-                delta1, tickLower, tickUpper)), (BalanceDelta));
+                abi.encode(Action.ModLP, sqrtPriceX96, delta1, 
+                delta0, tickLower, tickUpper)), (BalanceDelta));
             /* 
             require(-delta.amount0() == int(delta0) 
                  && -delta.amount1() == int(delta1), "+"); */
@@ -378,17 +374,18 @@ contract MO is SafeCallback, Ownable {
 
     function set_price_eth(bool up,
         bool refresh) external {
-        require(_ETH_PRICE != 0, "price init");
-        uint delta = _ETH_PRICE / 20;
-        _ETH_PRICE = up ? _ETH_PRICE + delta:
-                          _ETH_PRICE - delta;
+        uint _price = getPrice(0, false);
+        uint delta = _price / 20;
+        _ETH_PRICE = up ? _price + delta:
+                          _price - delta;
     }
 
     function getPrice(uint160 sqrtPriceX96, bool v3)
         public /*view*/ returns (uint price) {
-        if (sqrtPriceX96 == 0 && _ETH_PRICE > 0) { // TODO pure
+        if (_ETH_PRICE > 0) { // TODO pure
             return _ETH_PRICE; // remove
-        } else if (sqrtPriceX96 == 1) {
+        } 
+        if (sqrtPriceX96 == 0) {
             PoolId id = vanillaKey.toId();
             (sqrtPriceX96,,,) = poolManager.getSlot0(id);
         }
@@ -403,7 +400,6 @@ contract MO is SafeCallback, Ownable {
             price = FullMath.mulDiv(ratioX128, 
                 WAD * 1e12, 1 << 128);
         } 
-        _ETH_PRICE = price; // TODO remove
     }
 
     // amount specifies only how much we are trying to sell...
@@ -426,25 +422,21 @@ contract MO is SafeCallback, Ownable {
                      POOLED_USD * 1e12, price);
                 remains = msg.value - value;
                 weth.deposit{ value: remains }();
-                console.log("remains", remains);
                 if (token == address(USDC)) {
-                    console.log("boughtFromV3", 
                     v3Router.exactInput(ISwapRouter.ExactInputParams(
                         abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                        msg.sender, block.timestamp, remains, 0))); 
+                        msg.sender, block.timestamp, remains, 0)); 
                 } else { 
                     v3Router.exactInput(ISwapRouter.ExactInputParams(
                         abi.encodePacked(address(weth), uint24(500), address(USDC)), 
                         address(this), block.timestamp, remains, 0)); 
                         // TODO swap USDC for token user wants...
                 }
-                amount = value;  // < the most our v4 pool can swap 
-                console.log("amountPreREX", amount); // FIXME POOLED_USD not getting emptied!
+                amount = value;  // < the most our v4 pool can swap
             } else { 
                 amount = msg.value;
             } uint feeAmount;
             (amount, feeAmount) = rex.deposit{value: amount}(address(this), true);
-            console.log("PostREX", amount, "feeAMOUNT", feeAmount);
         } else {
             require(GD.deposit(msg.sender, token, amount) == amount, "swap$");
             uint scale = 18 - IERC20(token).decimals();
@@ -492,7 +484,7 @@ contract MO is SafeCallback, Ownable {
                 zeroForOne: zeroForOne, amountSpecified: -int(amount),
                 sqrtPriceLimitX96: _paddedSqrtPrice(sqrtPriceX96, 
                     !zeroForOne, 500) }), ZERO_BYTES); 
-                    who = sender; out = token; console.log("AMOUNT_inside_SWAP", amount);
+                    who = sender; out = token;
         } 
         else if (discriminant == Action.Repack) { 
             (uint128 myLiquidity, uint160 sqrtPriceX96,
@@ -535,42 +527,33 @@ contract MO is SafeCallback, Ownable {
             delta0 = uint(int(delta.amount0())); 
             delta1 = uint(int(delta.amount1())); */
         }
-        else if (discriminant == Action.RemoveETH) { // TODO
-            // delta = _modLP(delta0, delta1, tickLower, 
-            //                 tickUpper, sqrtPriceX96);
-        }
-        else if (discriminant == Action.AddETH) {
-            (uint160 sqrtPriceX96, uint delta0, uint delta1,
+        else if (discriminant == Action.ModLP) {
+            (uint160 sqrtPriceX96, uint delta1, uint delta0,
             int24 tickLower, int24 tickUpper) = abi.decode(
-            data[32:], (uint160, uint, uint, int24, int24));
+            data[32:], (uint160, uint, uint, int24, int24));  
             delta = _modLP(delta0, delta1, tickLower,
                             tickUpper, sqrtPriceX96);
         } 
-        emit PrintDelta(delta.amount0(), delta.amount1());
         if (delta.amount0() > 0) { uint delta0 = uint(int(delta.amount0()));
             vanillaKey.currency0.take(poolManager, address(this), delta0, false);
             GD.take(who, delta0, out); mockUSD.burn(delta0);             
-            if (inRange) { console.log("SHOULD BE ENTERING");
-                POOLED_USD -= delta0;
-            }
+            if (inRange) POOLED_USD -= delta0;
         }
         else if (delta.amount0() < 0) { 
             uint delta0 = uint(int(-delta.amount0())); mockUSD.mint(delta0); 
             vanillaKey.currency0.settle(poolManager, address(this), delta0, false);
-            if (inRange) { POOLED_USD += delta0; }
+            if (inRange) POOLED_USD += delta0;
         }
         if (delta.amount1() > 0) { uint delta1 = uint(int(delta.amount1()));
             vanillaKey.currency1.take(poolManager, address(this), delta1, false);
             mockETH.burn(delta1); unRex(delta1);
-            if (inRange) { POOLED_ETH -= delta1; }
+            if (inRange) POOLED_ETH -= delta1;
         }
         else if (delta.amount1() < 0) { 
             uint delta1 = uint(int(-delta.amount1())); mockETH.mint(delta1); 
             vanillaKey.currency1.settle(poolManager, address(this), delta1, false);
-            if (inRange) { POOLED_ETH += delta1; }
+            if (inRange) POOLED_ETH += delta1;
         }
-        console.log("POOLED_ETH", POOLED_ETH);
-        console.log("POOLED_USD", POOLED_USD);
         return abi.encode(delta);
     }
 
@@ -713,16 +696,34 @@ contract MO is SafeCallback, Ownable {
         }        
     }
 
-    function _unwind(address repay, address withdraw, 
+    function _unwind(address repay, address out, 
         uint borrowed, uint supplied) internal {
         USDC.approve(address(aave), borrowed);
         aave.repay(repay, borrowed, 2, address(this));  
-        aave.withdraw(withdraw, supplied, address(this));
+        aave.withdraw(out, supplied, address(this));
     }
 
-    function removeLiquidity(uint amount) external { // TODO 
-
-
+    function withdraw(uint amount) external { 
+        (uint160 sqrtPriceX96, 
+        int24 tickLower, int24 tickUpper,) = _repack(); 
+        autoManaged[msg.sender] -= amount;
+        uint pending = PENDING_ETH; 
+        uint remains = amount;
+        if (pending > 0) { 
+            uint pulling = Math.min(pending, amount); 
+            PENDING_ETH = pending - pulling;
+            remains -= pulling; unRex(pulling); 
+        }
+        if (remains > 0) {
+            require(mockETH.balanceOf(address(this)) > remains, "rm");
+            BalanceDelta delta = abi.decode(poolManager.unlock(
+                abi.encode(Action.ModLP, sqrtPriceX96, remains, 
+                0, tickLower, tickUpper)), (BalanceDelta));
+            uint ethBalance = address(this).balance;
+            if (ethBalance > 0) { 
+                CurrencyLibrary.ADDRESS_ZERO.transfer(
+                               msg.sender, ethBalance); }
+        } // TODO P&L
     }
 
     function _modifyLiquidity(int delta, // liquidity delta
@@ -735,15 +736,19 @@ contract MO is SafeCallback, Ownable {
     }
     
     function _modLP(uint deltaZero, uint deltaOne, int24 tickLower, 
-        int24 tickUpper, uint160 sqrtPriceX96) internal returns (BalanceDelta) {
-        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
-        uint128 liquidity = LiquidityAmounts.getLiquidityForAmount1(
-                               sqrtPriceAX96, sqrtPriceX96, deltaOne);        
+        int24 tickUpper, uint160 sqrtPriceX96) internal returns
+        (BalanceDelta) {  int flip = deltaZero > 0 ? int(-1) : int(1);
         (BalanceDelta totalDelta, 
-         BalanceDelta feesAccrued) = _modifyLiquidity(int(uint(liquidity)),
-                                                      tickLower, tickUpper);
+         BalanceDelta feesAccrued) = _modifyLiquidity(flip * int(uint(
+            _calculateLiquidity(tickLower, sqrtPriceX96, deltaOne))),
+                                tickLower, tickUpper);
         return totalDelta;
+    }
+
+    function _calculateLiquidity(int24 tickLower, uint160 sqrtPriceX96, 
+        uint delta) internal returns (uint128 liquidity) {
+        liquidity = LiquidityAmounts.getLiquidityForAmount1(
+            TickMath.getSqrtPriceAtTick(tickLower), sqrtPriceX96, delta);
     }
 
     function _alignTick(int24 tick) 

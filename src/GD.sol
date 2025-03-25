@@ -38,16 +38,16 @@ contract Good is // stable basket
     
     uint private _deployed;
     uint private _totalSupply;
-    Pod private totalDeposits;
-
+    Metrics private coreMetrics;
     string private _name = "QU!D";
     string private _symbol = "GD";
-    
     address payable public Mindwill;
     
+    struct Metrics { 
+        uint last; uint total; uint yield;
+    }
     struct Pod { uint credit; uint debit; }
     mapping(address => Pod) public perVault;
-    
     mapping(address => bool) public isVault;
     mapping(address => bool) public isStable;
     mapping(address => address) public vaults;
@@ -157,18 +157,20 @@ contract Good is // stable basket
     }
     
     function get_total_deposits(bool force) 
-        public returns (uint) { Pod memory total = totalDeposits;
-        if (force || block.timestamp - total.credit > 10 minutes) {
+        public returns (uint) { Metrics memory stats = coreMetrics;
+        if (force || block.timestamp - stats.last > 10 minutes) {
             // give credit to this calculation often, lest stale...
-            uint[9] memory amounts = get_deposits();
-            total.credit = block.timestamp;
-            total.debit = amounts[0] / 1e12; 
-            totalDeposits = total;
-        }   return total.debit; 
-    }
+            uint[10] memory amounts = get_deposits();
+            stats.last = block.timestamp;
+            stats.total = amounts[0] / 1e12;
+            stats.yield = FullMath.mulDiv(10000, 
+               amounts[9], amounts[0]) - 10000;
+            coreMetrics = stats;
+        }   return stats.total; 
+    } 
 
     function get_deposits() public view 
-        returns (uint[9] memory amounts) {
+        returns (uint[10] memory amounts) {
         address vault; uint shares; // 4626
         uint ghoIndex = stables.length - 1;
         for (uint i = 0; i < ghoIndex; i++) { 
@@ -177,8 +179,11 @@ contract Good is // stable basket
             vault = vaults[stables[i]];
             shares = perVault[vault].debit;
             if (shares > 0) { 
-                amounts[i + 1] = IERC4626(vault).convertToAssets(shares);
-                amounts[0] += amounts[i + 1] * multiplier; // track total
+                shares = IERC4626(vault).convertToAssets(shares) * multiplier;
+                amounts[i + 1] = shares; amounts[0] += shares; // track total;
+                amounts[9] += FullMath.mulDiv(shares, // < weighted sum of 
+                    IERC4626(vault).totalAssets(), // the APY for staking
+                    IERC4626(vault).totalSupply());
             }
         } vault = vaults[stables[ghoIndex]]; 
         
@@ -194,7 +199,7 @@ contract Good is // stable basket
         uint amount, address token) public onlyUs returns (uint sent) {
         address vault; 
         if (token == address(this)) { // evenly distributed disbursement...
-            uint[9] memory amounts = get_deposits(); uint total = amounts[0];
+            uint[10] memory amounts = get_deposits(); uint total = amounts[0];
             
             uint ghoIndex = stables.length; 
             for (uint i = 1; i < ghoIndex; i++) { 

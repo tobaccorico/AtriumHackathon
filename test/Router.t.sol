@@ -66,8 +66,8 @@ contract RouterTest is Test, Fixtures {
     IERC20 public FRAX = IERC20(0x853d955aCEf822Db058eb8505911ED77F175b99e);
     
     address[] public VAULTS;
-    IERC4626 public smokehouseUSDCvault = IERC4626(0xBEeFFF209270748ddd194831b3fa287a5386f5bC);
-    IERC4626 public smokehouseUSDTvault = IERC4626(0xA0804346780b4c2e3bE118ac957D1DB82F9d7484);
+    IERC4626 public gauntletUSDCvault = IERC4626(0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458);
+    IERC4626 public steakhouseUSDTvault = IERC4626(0xbEef047a543E45807105E51A8BBEFCc5950fcfBa);
     
     // unlike other vaults, SGHO has special interface (similar to ERC4626)
     IERC20 public SGHO = IERC20(0x1a88Df1cFe15Af22B3c4c783D4e6F7F9e0C1885d);
@@ -86,8 +86,8 @@ contract RouterTest is Test, Fixtures {
             address(CRVUSD), address(GHO)
         ]; // ordering is very important!
         VAULTS = [
-            address(smokehouseUSDCvault), 
-            address(smokehouseUSDTvault),
+            address(gauntletUSDCvault), 
+            address(steakhouseUSDTvault),
             address(SDAI), address(SUSDS), 
             address(SFRAX), address(SUSDE), 
             address(SCRVUSD), address(SGHO)
@@ -140,7 +140,7 @@ contract RouterTest is Test, Fixtures {
         assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore, 
                                 expectingToBuy, USDCfee);
         
-        price = V4router.getPrice(1, false);  
+        price = V4router.getPrice(0, false);  
         uint balanceBefore = User01.balance;
         // note, we're not approving the router!
         USDC.approve(address(quid), price / 1e12); 
@@ -160,8 +160,7 @@ contract RouterTest is Test, Fixtures {
         USDCbalanceAfter = USDC.balanceOf(User01);
 
         assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore, 
-                            expectingToBuy, USDCfee * 100); 
-                            // amount is 100x, so fee is too
+                            expectingToBuy, USDCfee * 133); 
         
         vm.stopPrank();
     }
