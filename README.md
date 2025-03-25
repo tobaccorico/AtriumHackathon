@@ -1,46 +1,66 @@
-`forge install`  
-`forge test -vv`  
+## Foundry
 
-In order to save gas, rather than writing a hook  
-we decided to build functionality into a router.  
-The router is embedded with a simple form of  
-ASS (based on the Greedy Sequencing Rule:  
-batch orders by type to prevent sandwiches).  
+**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
 
-It supports adding liquidity out-of-range, as  
-well as letting the range be managed for you:  
-this provides optimal returns for LPs, except  
-unlike the canonical USDC<>WETH pool, the  
-dollar side is split between multiple stables...  
+Foundry consists of:
 
-There is no IL for single-sided provision,  
-by virtue of a "queue" (`PENDING_ETH`).  
-There is only 1 PoolKey which represents  
-ETH abstractly paired with (Some) dollar.  
-LP fees are split 50:50 between ETH and  
-dollar depositors, pro rata to total liquidity  
-(not what's virtually deployed in the pool).  
+-   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
+-   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
+-   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
+-   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
 
-In being abstract, swaps are performed  
-using “virtual balances”; this is because  
-ETH “on deposit” is really in Dinero’s LST,  
-and not in the PoolManager, while various  
-dollars are either in Morpho vaults or their  
-native staking (e.g. GHO’s safety module).  
+## Documentation
 
-The utility token, GD, is considered  
-the LP token for our "stable basket" 🏀   
-where dollars (8 in total) are swappable  
-interally (lAMMbert function). Thanks to  
-AAVE, it’s also possible to do “leveraged  
-swaps”: these take a bit of time, but are  
-guaranteed to be profitable for both the  
-protocol and the originators of the swap;  
+https://book.getfoundry.sh/
 
-it provides an incentivised mechanism for   
-slowly shifting liquidity from UniV3 to V4.  
-The strategy reminds us of Allen Iverson’s  
-signature basketball move, the cross-over;  
-through a weighted median function, the  
-dollar LPs are able to vote on their % rake.  
+## Usage
 
+### Build
+
+```shell
+$ forge build
+```
+
+### Test
+
+```shell
+$ forge test
+```
+
+### Format
+
+```shell
+$ forge fmt
+```
+
+### Gas Snapshots
+
+```shell
+$ forge snapshot
+```
+
+### Anvil
+
+```shell
+$ anvil
+```
+
+### Deploy
+
+```shell
+$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+```
+
+### Cast
+
+```shell
+$ cast <subcommand>
+```
+
+### Help
+
+```shell
+$ forge --help
+$ anvil --help
+$ cast --help
+```
