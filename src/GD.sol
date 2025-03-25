@@ -182,8 +182,8 @@ contract Good is // stable basket
                 shares = IERC4626(vault).convertToAssets(shares) * multiplier;
                 amounts[i + 1] = shares; amounts[0] += shares; // track total;
                 amounts[9] += FullMath.mulDiv(shares, // < weighted sum of 
-                    IERC4626(vault).totalAssets(), // the APY for staking
-                    IERC4626(vault).totalSupply());
+                    IERC4626(vault).totalAssets() * multiplier, // APY 
+                    IERC4626(vault).totalSupply()); // for staking...
             }
         } vault = vaults[stables[ghoIndex]]; 
         

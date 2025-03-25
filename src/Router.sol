@@ -9,27 +9,23 @@ import {IPirexETH} from "./imports/IPirexETH.sol";
 import {IPool} from "aave-v3/interfaces/IPool.sol";
 import {WETH} from "solmate/src/tokens/WETH.sol";
 
-import {EModeConfiguration} from "aave-v3/protocol/libraries/configuration/EModeConfiguration.sol";
-import {DataTypes} from "aave-v3/protocol/libraries/types/DataTypes.sol";
 import {IUniswapV3Pool} from "./imports/V3/IUniswapV3Pool.sol";
 import {ISwapRouter} from "./imports/V3/ISwapRouter.sol"; // on L1 and Arbitrum
 // import {IV3SwapRouter as ISwapRouter} from "./imports/IV3SwapRouter.sol"; // base
 
+import {SafeCallback} from "v4-periphery/src/base/SafeCallback.sol";
+import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/src/types/BalanceDelta.sol";
-import {CurrencyLibrary, Currency} from "v4-core/src/types/Currency.sol";
+import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
+import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
 import {CurrencySettler} from "v4-core/test/utils/CurrencySettler.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
+
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
-
-import {SafeCallback} from "v4-periphery/src/base/SafeCallback.sol";
-import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
-
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
-import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -737,7 +733,7 @@ contract MO is SafeCallback, Ownable {
     
     function _modLP(uint deltaZero, uint deltaOne, int24 tickLower, 
         int24 tickUpper, uint160 sqrtPriceX96) internal returns
-        (BalanceDelta) {  int flip = deltaZero > 0 ? int(-1) : int(1);
+        (BalanceDelta) {  int flip = deltaZero > 0 ? int(1) : int(-1);
         (BalanceDelta totalDelta, 
          BalanceDelta feesAccrued) = _modifyLiquidity(flip * int(uint(
             _calculateLiquidity(tickLower, sqrtPriceX96, deltaOne))),
@@ -746,7 +742,7 @@ contract MO is SafeCallback, Ownable {
     }
 
     function _calculateLiquidity(int24 tickLower, uint160 sqrtPriceX96, 
-        uint delta) internal returns (uint128 liquidity) {
+        uint delta) internal pure returns (uint128 liquidity) {
         liquidity = LiquidityAmounts.getLiquidityForAmount1(
             TickMath.getSqrtPriceAtTick(tickLower), sqrtPriceX96, delta);
     }
@@ -770,7 +766,7 @@ contract MO is SafeCallback, Ownable {
     }
 
     function _paddedSqrtPrice(uint160 sqrtPriceX96, 
-        bool up, uint delta) internal returns (uint160) { 
+        bool up, uint delta) internal pure returns (uint160) { 
         uint x = up ? FixedPointMathLib.sqrt(1e18 + delta * 1e14):
                       FixedPointMathLib.sqrt(1e18 - delta * 1e14);
         return uint160(FixedPointMathLib.mulDivDown(x, uint(sqrtPriceX96), 

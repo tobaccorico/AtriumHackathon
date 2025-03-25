@@ -19,7 +19,6 @@ deny_warnings = false
 cbor_metadata = false
 sparse_mode = false
 build_info = true
-verbosity = 4
 
 [profile.dependencies]
 v4-core = { git = "https://github.com/uniswap/v4-core" }
