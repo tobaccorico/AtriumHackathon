@@ -9,6 +9,17 @@ pragma solidity ^0.8.24;
  * @author redactedcartel.finance
  */
 interface IPirexETH {
+
+     enum Fees {
+        // Fee type for deposit
+        Deposit,
+        // Fee type for redemption
+        Redemption,
+        // Fee type for instant redemption
+        InstantRedemption
+    }
+    function fees(Fees) external view returns (uint32);
+
     /**
      * @notice Handle pxETH minting in return for ETH deposits.
      * @dev    This function handles the minting of pxETH in return for ETH deposits.

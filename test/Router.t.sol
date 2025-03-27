@@ -78,6 +78,7 @@ contract RouterTest is Test, Fixtures {
     IERC4626 public SCRVUSD = IERC4626(0x0655977FEb2f289A4aB78af67BAB0d17aAb84367);    
 
     Good public quid; MO public V4router;
+    uint stack = 10000 * USDC_PRECISION;
     function setUp() public {
         STABLECOINS = [
             address(USDC), address(USDT),
@@ -118,9 +119,9 @@ contract RouterTest is Test, Fixtures {
         USDC.transfer(address(V4router), 1 * USDC_PRECISION);
         V4router.setQuid{value: 1 wei}(address(quid));
     }
- 
-    function testSwap() public {     
-        uint stack = 10000 * USDC_PRECISION;
+
+
+    function testSwap() public {
         uint USDCfee = 3 * USDC_PRECISION; // incl slippage
         uint ETHfee = 6 * 1e15; // incl Dinero fee + ^^^^^ 
         
@@ -128,7 +129,7 @@ contract RouterTest is Test, Fixtures {
         USDC.approve(address(quid), 5 * stack);
         quid.mint(User01, 5 * stack, address(USDC), 0);
         
-        V4router.deposit{value: 25 ether}();       
+        V4router.deposit{value: 25 ether}();
     
         uint price = V4router.getPrice(0, false);
         uint expectingToBuy = price / 1e12;
@@ -139,8 +140,8 @@ contract RouterTest is Test, Fixtures {
         uint USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore, 
                                 expectingToBuy, USDCfee);
-        
-        price = V4router.getPrice(0, false);  
+
+        price = V4router.getPrice(0, false);
         uint balanceBefore = User01.balance;
         // note, we're not approving the router!
         USDC.approve(address(quid), price / 1e12); 
@@ -162,18 +163,45 @@ contract RouterTest is Test, Fixtures {
         assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore, 
                             expectingToBuy, USDCfee * 133); 
         
+        // TODO remove ETH
+
         vm.stopPrank();
     }
 
-    function testLeveragedSwapZeroForOne() public {
+    // testing ability is limited because we can't
+    // simulate a price drop inside the Univ3 pool
+    function testLeveragedSwaps() public {
+        vm.startPrank(User01);
+        USDC.approve(address(quid), 5 * stack);
+        quid.mint(User01, 5 * stack, address(USDC), 0);
+        V4router.deposit{value: 25 ether}();
 
+        // uint price = V4router.getPrice(0, false);
+        // uint expectingToBuy = price * 1 ether;
+        // expectingToBuy += expectingToBuy / 25;
+        // ^ leveraged swaps give a boosted gain
+
+        V4router.leverZeroForOne{value: 1 ether}();
+
+        // Simulate spike in price
+        // V4router.set_price_eth(true);
+
+        // WE will get "Too little received"
+        // because the simulated price spike
+        // will not correspond to pool price
+        // V4router.unwind(true, User01);
+
+        USDC.approve(address(quid), stack/10);
+        V4router.leverOneForZero(stack/10,
+                            address(USDC));
+        
+        vm.stopPrank();
     }
 
-    function testLeveragedSwapOneForZero() public {
-
-    }
 
     function testOutOfRange() public {
-        
+        // TODO withdraw while still out of range
+        // TODO cannot deposit if in-range
+        // TODO withdraw while now in-range
     }
 }

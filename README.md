@@ -5,8 +5,8 @@
 In order to save gas, rather than writing a hook  
 we decided to build functionality into a router.  
 *The router is embedded with a simple form of  
-ASS (based on the Greedy Sequencing Rule:  
-batch orders by type to prevent sandwiches).*  
+**ASS** (based on the Greedy Sequencing Rule:  
+batch orders by type **prevents sandwiches**).*  
 
 It supports adding liquidity out-of-range, as  
 well as letting the range be managed for you:  
@@ -18,37 +18,42 @@ If a swap can't by satisfied by internal
 liquidity entirely, it gets split between  
 our router and the V3 router (legacy).  
 
-There is no IL for single-sided provision,  
+There is no IL for **single-sided provision**,  
 by virtue of a "queue" (`PENDING_ETH`).  
 There is only 1 PoolKey which represents  
 ETH abstractly paired with (Some) dollar.  
+
 *LP fees are split 50:50 between ETH and  
 dollar depositors, pro rata to total liquidity  
 (not what's virtually deployed in the pool).*  
 
-*A sort of zero-coupon bond feature is used  
-to tokenise LP gains upfront, redeemable  
-upon maturity (based on P&l updated live).*
+A sort of **zero-coupon bond** feature is used  
+to tokenise gains upfront (redeemable later),  
+with flexible maturities: our **6909 extension**.
 
 In being abstract, swaps are performed  
 using “virtual balances”; this is because  
-ETH “on deposit” is really in Dinero’s LST,  
+ETH “on deposit” is really in **Dinero’s LST**,  
 and not in the PoolManager, while various  
 dollars are either in Morpho vaults or their  
 native staking (e.g. GHO’s safety module).  
 
+**In order for this to be successful in prod**  
+**Dinero DAO must vote to cut fees 100x**
+
 The utility token, GD, is considered  
 the LP token for our "stable basket" 🏀   
 where dollars (8 in total) *are swappable  
-interally (lAMMbert function).* Thanks to  
-AAVE, it’s also possible to do “leveraged  
-swaps”: these take a bit of time, but are  
-guaranteed to be profitable for both the  
-protocol and the originators of the swap;  
+interally through a **lAMMbert function***
 
-it provides an incentivised mechanism for   
-slowly shifting liquidity from UniV3 to V4.  
-The strategy reminds us of Allen Iverson’s  
-signature basketball move, the cross-over;  
-*through a weighted median function, the  
-dollar LPs are able to vote on their % rake.*
+AAVE allows us to do what we're calling  
+“**levered swaps**”: they take time, but are  
+**guaranteed to be profitable** for both the  
+protocol, and the originators of the swaps  
+(for them, in annualised terms, ~40% yield)
+
+With almost negligible liquidation risk,  
+providing an incentivised mechanism for  
+slowly shifting liquidity from UniV3 to V4,  
+the strategy reminds us of Allen Iverson’s  
+signature basketball move: the cross-over.  

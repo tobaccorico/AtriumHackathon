@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "lib/forge-std/src/console.sol"; 
+import "lib/forge-std/src/console.sol";
 // TODO delete logging before mainnet...
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -20,6 +20,7 @@ interface IStakeToken is IERC20 { // StkGHO (safety module)
     // here the amount is in underlying, not in shares...
     function redeem(address to, uint256 amount) external;
     // the amount param is in shares, not underlying...
+    function claimRewards(address to, uint256 amount) external;
     function previewStake(uint256 assets) 
              external view returns (uint256);
     function previewRedeem(uint256 shares) 
@@ -36,6 +37,7 @@ contract Good is // stable basket
     uint constant WAD = 1e18;
     address[] public stables;
     
+    address _deployer; 
     uint private _deployed;
     uint private _totalSupply;
     Metrics private coreMetrics;
@@ -138,38 +140,37 @@ contract Good is // stable basket
     constructor(address _mo, 
         address[] memory _stables, 
         address[] memory _vaults) { 
-        _deployed = block.timestamp; Mindwill = payable(_mo); 
+        _deployed = block.timestamp; _deployer = msg.sender;
         require(_stables.length == _vaults.length, "align"); 
         address stable; address vault; stables = _stables;
         for (uint i = 0; i < _vaults.length; i++) {
             stable = _stables[i]; vault = _vaults[i];
             isVault[vault] = true; vaults[stable] = vault;
             isStable[stable] = true;
-        }
-    }
-
-    function getAPY() 
-        public returns (uint) { uint totalUSD;
-        uint totalValue = get_total_deposits(true);
-        for (uint i = 0; i < stables.length; i++) {
-            totalUSD += perVault[vaults[stables[i]]].credit;
-        } return FullMath.mulDiv(100, totalUSD, totalValue);
+        }   Mindwill = payable(_mo); 
     }
     
     function get_total_deposits(bool force) 
         public returns (uint) { Metrics memory stats = coreMetrics;
         if (force || block.timestamp - stats.last > 10 minutes) {
-            // give credit to this calculation often, lest stale...
+            // give credit to this calculation often, lest stale
             uint[10] memory amounts = get_deposits();
             stats.last = block.timestamp;
             stats.total = amounts[0] / 1e12;
             stats.yield = FullMath.mulDiv(10000, 
-               amounts[9], amounts[0]) - 10000;
-            coreMetrics = stats;
-        }   return stats.total; 
+               amounts[9], amounts[0] - amounts[8]) - 10000;
+            coreMetrics = stats; // exclude sGHO "yield" as this
+        }   return stats.total; // goes to the contract deployer
     } 
 
-    function get_deposits() public view 
+    function claim() external {
+        address vault = vaults[
+            stables[stables.length-1]];
+        IStakeToken(vault).claimRewards(
+            _deployer, type(uint256).max);
+    }
+
+    function get_deposits() public 
         returns (uint[10] memory amounts) {
         address vault; uint shares; // 4626
         uint ghoIndex = stables.length - 1;
@@ -197,11 +198,10 @@ contract Good is // stable basket
 
     function take(address who, // on whose behalf $ exiting the basket
         uint amount, address token) public onlyUs returns (uint sent) {
-        address vault; 
-        if (token == address(this)) { // evenly distributed disbursement...
-            uint[10] memory amounts = get_deposits(); uint total = amounts[0];
-            
-            uint ghoIndex = stables.length; 
+        if (token == address(this)) { // evenly distributed disbursement
+            uint[10] memory amounts = get_deposits();
+            uint total = amounts[0]; address vault;
+            uint ghoIndex = stables.length;
             for (uint i = 1; i < ghoIndex; i++) { 
                 uint divisor = i > 1 ? 1 : 1e12;
                 amounts[i] = FullMath.mulDiv(amount, FullMath.mulDiv(
@@ -216,7 +216,8 @@ contract Good is // stable basket
             amounts[ghoIndex] = FullMath.mulDiv(amount, FullMath.mulDiv(
                                     WAD, amounts[ghoIndex], total), WAD);
             
-            if (amounts[ghoIndex] > 0) {
+            if (amounts[ghoIndex] > 0) { 
+                // exchange rate is 1:1, but just to be safe we calculate
                 amount = IStakeToken(vault).previewStake(amounts[ghoIndex]);
                 require(IStakeToken(vault).previewRedeem(amount) == amounts[ghoIndex], "sgho");
                 IStakeToken(vault).redeem(who, amount); sent += amounts[ghoIndex];
@@ -241,7 +242,7 @@ contract Good is // stable basket
         address token, uint amount)
         public returns (uint usd) {
         address GHO = stables[stables.length - 1]; 
-        address SGHO = vaults[GHO]; address vault; 
+        address SGHO = vaults[GHO]; address vault;
         if (isVault[token] && token != SGHO) { 
             amount = Math.min(
                 IERC4626(token).allowance(from, address(this)),
@@ -288,7 +289,7 @@ contract Good is // stable basket
         
         totalBalances[receiver] += amount;
         balanceOf[receiver][id] += amount;
-        
+
         emit Transfer(msg.sender, 
             address(0), receiver,
             id, amount);

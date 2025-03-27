@@ -32,6 +32,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {stdMath} from "forge-std/StdMath.sol";
 import {IERC4626} from "forge-std/interfaces/IERC4626.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
@@ -46,7 +47,7 @@ contract MO is SafeCallback, Ownable {
     using CurrencySettler for Currency;
 
     uint internal _ETH_PRICE; // TODO remove
-    
+
     PoolKey vanillaKey; IUniswapV3Pool v3Pool;
     bool internal token1isWETH; // ^
     // for our v4 pool ETH is token1
@@ -90,6 +91,9 @@ contract MO is SafeCallback, Ownable {
     // to measure APY% for:
     uint internal USD_FEES;
     uint internal ETH_FEES;
+    uint internal YIELD; // TODO:
+    // use ring buffer to average
+    // out the yield over a week
 
     // _unlockCallback    
     enum Action { Swap, 
@@ -134,7 +138,7 @@ contract MO is SafeCallback, Ownable {
     }
 
     // must send $1 USDC to address(this) & attach msg.value 1 wei
-    function setQuid(address _quid) external payable onlyOwner { 
+    function setQuid(address _quid) external payable onlyOwner {
         // these virtual balances represent assets inside the curve
         mockToken temporaryToken = new mockToken(address(this), 18);
         mockToken tokenTemporary = new mockToken(address(this), 6);
@@ -152,13 +156,13 @@ contract MO is SafeCallback, Ownable {
             hooks: IHooks(address(0))
         }); renounceOwnership();    
 
-        (,int24 tick,,,,,) = v3Pool.slot0();
-        poolManager.initialize(vanillaKey, 
-            TickMath.getSqrtPriceAtTick(tick));
+        require(GD.Mindwill() == address(this), "!");
+        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
+        poolManager.initialize(vanillaKey, sqrtPriceX96);
+        USDC.approve(address(GD), type(uint256).max);
+        // ^ just for calling GD.deposit in unwind()
 
-        require(GD.Mindwill() == address(this), "!");        
-        USDC.approve(address(GD), type(uint256).max); // TODO ?
-        mockUSD.approve(address(poolManager), 
+        mockUSD.approve(address(poolManager),
                         type(uint256).max);
         USDC.approve(address(v3Router),
                     type(uint256).max);
@@ -179,84 +183,83 @@ contract MO is SafeCallback, Ownable {
         aave.supply(address(USDC),
            1000000, address(this), 0);
         aave.setUserUseReserveAsCollateral(
-                        address(USDC), true);        
+                        address(USDC), true);
     }
 
     // the protocol is net long, keeping 1ETH on deposit,
     // while levering dollar value of 1ETH to go short:
     // borrowing 70% on AAVE, then selling that for USDC
-    function leverZeroForOne(uint amount) 
-        public payable isInitialised {
-        uint borrowing =  amount * 7 / 10;
-        uint remains = amount - msg.value;
-        if (remains > 0) { 
-            weth.transferFrom(msg.sender, 
-                address(this), remains);
-                weth.withdraw(remains);  
-        }
-        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0(); 
-        uint price = getPrice(sqrtPriceX96, true); 
-        
-        uint totalValue = FullMath.mulDiv(amount, price, WAD);
-        
+    function leverZeroForOne() public
+        payable isInitialised {
+        uint borrowing = msg.value * 7 / 10;
+        uint buffer = msg.value - borrowing;
+        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
+        uint price = getPrice(sqrtPriceX96, true);
+        uint totalValue = FullMath.mulDiv(msg.value,
+                                         price, WAD);
         require(totalValue > 50 * WAD, "grant");
-        totalValue /= 1e12; // USDC's 1e6 precision 
-        require(totalValue == GD.take(address(this), 
-            totalValue, address(USDC)), "$0for1");
-        
-        USDC.approve(address(aave), totalValue);
+        totalValue /= 1e12; // 1e6 precision
+        uint took = GD.take(address(this),
+                totalValue, address(USDC));
+
+        require(stdMath.delta(totalValue, took) <= 5, "0for1$");
+        totalValue = took; USDC.approve(address(aave), totalValue);
+
         aave.supply(address(USDC), totalValue, address(this), 0);
         aave.borrow(address(weth), borrowing, 2, 0, address(this));
 
-        amount = FullMath.mulDiv(borrowing, price, 1e12 * WAD);
+        uint amount = FullMath.mulDiv(borrowing, price, 1e12 * WAD);
         amount = v3Router.exactInput(ISwapRouter.ExactInputParams(
-            abi.encodePacked(address(weth), uint24(500), address(USDC)), 
-            address(this), block.timestamp, borrowing, amount - amount / 300));
+            abi.encodePacked(address(weth), uint24(500), address(USDC)),
+            address(this), block.timestamp, borrowing, amount - amount / 200));
             require(amount == GD.deposit(address(this), address(USDC), amount));
 
-        pledgesZeroForOne[msg.sender] = viaAAVE({ 
+        uint withProfit = totalValue + totalValue / 30;
+        GD.mint(msg.sender, withProfit, address(GD), 0);
+        pledgesZeroForOne[msg.sender] = viaAAVE({
             supplied: totalValue, borrowed: borrowing,
-            buffer: 0, price: int(price) });
+            buffer: buffer, price: int(price) });
     }
 
-    function leverOneForZero(uint amount, address token) isInitialised external {
-        amount = GD.deposit(msg.sender, token, amount); 
-        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0(); 
-        uint price = getPrice(sqrtPriceX96, true); 
-        uint inETH = FullMath.mulDiv(WAD, amount, price);
-       
+    function leverOneForZero(uint amount,
+        address token) isInitialised external {
+        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
+        uint price = getPrice(sqrtPriceX96, true);
+
+        amount = GD.deposit(msg.sender, token, amount);
+        uint withProfit = amount + amount / 30;
+
+        uint inETH = FullMath.mulDiv(WAD,
+                amount * 1e12, price);
+
         inETH = unRex(inETH);
         weth.deposit{value: inETH}(); 
         weth.approve(address(aave), inETH);
-        
+
         aave.supply(address(weth), inETH, address(this), 0);
-        amount = FullMath.mulDiv(inETH * 7 / 10, price, 1e12 * WAD);
+        amount = FullMath.mulDiv(inETH * 7 / 10, price, WAD * 1e12);
         aave.borrow(address(USDC), amount, 2, 0, address(this));
         
-        require(amount == GD.deposit(address(this), 
+        require(amount == GD.deposit(address(this),
                 address(USDC), amount));
 
+        GD.mint(msg.sender, withProfit, address(GD), 0);
         pledgesOneForZero[msg.sender] = viaAAVE({ 
             supplied: inETH, borrowed: amount,
             buffer: 0, price: int(price) });
     }
     
-    function outOfRange(uint amount, address token, uint price, uint range) 
-        isInitialised public payable {
-        require(range > 100 
-             && range < 5000 
-             && range % 50 == 0, "width"); 
-
-        (,int24 lowerTick,
-          int24 upperTick,) = _repack();
-        
-        // TODO this needs to consider precision 
+    function outOfRange(uint amount, address token,
+        uint price, uint range) isInitialised
+        public payable { require(range > 100
+            && range < 5000 && range % 50 == 0, "width");
+        (,int24 lowerTick, int24 upperTick,) = _repack();
         uint160 sqrtPriceX96 = getSqrtPriceX96(price);
         
+         int liquidity; bool isStable;
         (int24 tickLower, uint160 lower,
-         int24 tickUpper, uint160 upper) = _updateTicks(sqrtPriceX96, range);
-       
-        int liquidity; bool isStable;
+         int24 tickUpper, uint160 upper) = _updateTicks(
+                                    sqrtPriceX96, range);
         if (token == address(0)) {
             require(tickLower > upperTick, "right");
             (amount, ) = rex.deposit{value: msg.value}
@@ -268,7 +271,7 @@ contract MO is SafeCallback, Ownable {
                 )));
         } else { 
             require(lowerTick > tickUpper, "left");
-            amount = GD.deposit(msg.sender, 
+            amount = GD.deposit(msg.sender,
                             token, amount);
             isStable = true;
             liquidity = int(uint(
@@ -280,7 +283,6 @@ contract MO is SafeCallback, Ownable {
             owner: msg.sender, lower: tickLower, 
             upper: tickUpper, liq: liquidity
         });
-        
         uint next = tokenId + 1;
         selfManaged[next] = newPosition;
         positions[msg.sender].push(next);
@@ -290,8 +292,8 @@ contract MO is SafeCallback, Ownable {
             poolManager.unlock(abi.encode(
                 Action.OutsideRange, liquidity, 
                 tickLower, tickUpper)), (BalanceDelta));
-        
-        /* require(-delta.amount0() == int(amount) || (isStable && 
+
+        /* require(-delta.amount0() == int(amount) || (isStable &&
                 -delta.amount1() == int(amount)), "re-arrange"); */
     }
 
@@ -326,7 +328,7 @@ contract MO is SafeCallback, Ownable {
         } // TODO unRex
     }
 
-    function deposit() isInitialised external payable { 
+    function deposit() isInitialised external payable {
         (uint amount, ) = rex.deposit{value: msg.value}(address(this), true);
         autoManaged[msg.sender] = amount; _addLiquidity(POOLED_USD, amount);
     }
@@ -334,23 +336,20 @@ contract MO is SafeCallback, Ownable {
     function _addLiquidity(
         uint delta0, uint delta1) 
         internal { (uint160 sqrtPriceX96, 
-        int24 tickLower, int24 tickUpper,) = _repack(); 
+        int24 tickLower, int24 tickUpper,) = _repack();
         uint price = getPrice(sqrtPriceX96, false);
         (delta0, delta1) = _addLiquidityHelper(delta0, delta1, price);
         if (delta0 > 0) { require(delta1 > 0, "_addLiquidity");
             BalanceDelta delta = abi.decode(poolManager.unlock(
                 abi.encode(Action.ModLP, sqrtPriceX96, delta1, 
                 delta0, tickLower, tickUpper)), (BalanceDelta));
-            /* 
-            require(-delta.amount0() == int(delta0) 
-                 && -delta.amount1() == int(delta1), "+"); */
         }
     }
 
     function _addLiquidityHelper(uint delta0, uint delta1, uint price) internal 
         returns (uint, uint) { uint pending = PENDING_ETH + delta1; // < queued
         uint surplus = GD.get_total_deposits(true) - delta0;
-        delta1 = Math.min(pending, 
+        delta1 = Math.min(pending,
              FullMath.mulDiv(surplus * 1e12, WAD, price));
         if (delta1 > 0) { 
             delta0 = FullMath.mulDiv(delta1, price, WAD * 1e12); 
@@ -368,9 +367,9 @@ contract MO is SafeCallback, Ownable {
         ));
     } // ^ TODO double check implementation
 
-    function set_price_eth(bool up,
-        bool refresh) external {
-        uint _price = getPrice(0, false);
+    // TODO remove (for testing purposes only)
+    function set_price_eth(bool up) external {
+        uint _price = getPrice(0, true);
         uint delta = _price / 20;
         _ETH_PRICE = up ? _price + delta:
                           _price - delta;
@@ -380,10 +379,14 @@ contract MO is SafeCallback, Ownable {
         public /*view*/ returns (uint price) {
         if (_ETH_PRICE > 0) { // TODO pure
             return _ETH_PRICE; // remove
-        } 
-        if (sqrtPriceX96 == 0) {
-            PoolId id = vanillaKey.toId();
-            (sqrtPriceX96,,,) = poolManager.getSlot0(id);
+        }
+        if (sqrtPriceX96 == 0) { // TODO remove
+            if (v3) {
+                (sqrtPriceX96,,,,,,) = v3Pool.slot0();
+            } else {
+                PoolId id = vanillaKey.toId();
+                (sqrtPriceX96,,,) = poolManager.getSlot0(id);
+            }
         }
         uint casted = uint(sqrtPriceX96);
         uint ratioX128 = FullMath.mulDiv(
@@ -399,7 +402,7 @@ contract MO is SafeCallback, Ownable {
     }
 
     // amount specifies only how much we are trying to sell...
-    function swap(address token, bool zeroForOne, uint amount) 
+    function swap(address token, bool zeroForOne, uint amount)
         isInitialised public payable returns (BalanceDelta) { 
         (uint160 sqrtPriceX96,,,) = _repack();
         uint price = getPrice(sqrtPriceX96, false);
@@ -415,45 +418,49 @@ contract MO is SafeCallback, Ownable {
             require(value >= 50 * WAD, "grant");
             if (value > POOLED_USD * 1e12) { 
                 value = FullMath.mulDiv(WAD,
-                     POOLED_USD * 1e12, price);
+                    POOLED_USD * 1e12, price);
                 remains = msg.value - value;
-                weth.deposit{ value: remains }();
-                if (token == address(USDC)) {
-                    v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                        msg.sender, block.timestamp, remains, 0)); 
-                } else { 
-                    v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(weth), uint24(500), address(USDC)), 
-                        address(this), block.timestamp, remains, 0)); 
-                        // TODO swap USDC for token user wants...
+
+                weth.deposit{ value: remains }(); amount = value; // < max v4 can swap
+                address receiver = token == address(USDC) ? msg.sender : address(this);
+
+                value = FullMath.mulDiv(remains, price, WAD * 1e12);
+                v3Router.exactInput(ISwapRouter.ExactInputParams(
+                    abi.encodePacked(address(weth), uint24(500), address(USDC)),
+                    receiver, block.timestamp, remains, value - value / 200));
+
+                if (receiver == address(this)) {
+                    // TODO swap USDC for desired token, send to msg.sender
                 }
-                amount = value;  // < the most our v4 pool can swap
-            } else { 
+
+            } else {
                 amount = msg.value;
-            } uint feeAmount;
-            (amount, feeAmount) = rex.deposit{value: amount}(address(this), true);
+            }
+            (amount, ) = rex.deposit{value: amount}(address(this), true);
         } else {
-            require(GD.deposit(msg.sender, token, amount) == amount, "swap$");
+            amount = GD.deposit(msg.sender, token, amount);
             uint scale = 18 - IERC20(token).decimals();
             value = scale > 0 ? amount * 10 ** scale : amount;
             // value is in ETH, and amount is in dollars
             value = FullMath.mulDiv(WAD, value, price);
-            if (value > POOLED_ETH) { 
-                value = FullMath.mulDiv(POOLED_ETH, price,
-                                            WAD * 1e12); 
-                remains = amount - value;
-                require(remains == GD.take(address(this),
-                        remains, address(USDC)), "$swap");
+            if (value > POOLED_ETH) {
+                value = FullMath.mulDiv(POOLED_ETH,
+                                 price, WAD * 1e12);
+
+                remains = amount - value; amount = value;
+                value = FullMath.mulDiv(WAD, remains, price);
+
+                require(stdMath.delta(remains, GD.take(address(this),
+                        remains, address(USDC))) <= 5, "$swap");
+
                 weth.withdraw(v3Router.exactInput(ISwapRouter.ExactInputParams(
-                    abi.encodePacked(address(USDC), uint24(500), address(weth)), 
-                    address(this), block.timestamp, remains, 0))); amount = value;
+                    abi.encodePacked(address(USDC), uint24(500), address(weth)),
+                    address(this), block.timestamp, remains, value - value / 200)));
             }
-        }
-        if (amount > 0) {
+        } if (amount > 0) {
             BalanceDelta delta = abi.decode(
                 poolManager.unlock(abi.encode(
-                    Action.Swap, sqrtPriceX96, 
+                    Action.Swap, sqrtPriceX96,
                     msg.sender, zeroForOne, amount, 
                     token)), (BalanceDelta));
 
@@ -486,14 +493,30 @@ contract MO is SafeCallback, Ownable {
             (uint128 myLiquidity, uint160 sqrtPriceX96,
             int24 tickLower, int24 tickUpper) = abi.decode(
                 data[32:], (uint128, uint160, int24, int24));
-            
+                uint price = getPrice(sqrtPriceX96, false);
+
             BalanceDelta fees; POOLED_ETH = 0; POOLED_USD = 0;
             (delta, // helper resets  ^^^^^^^^^^^^^^^^^^^^^^^
              fees) = _modifyLiquidity(
                 -int(uint(myLiquidity)),
                  tickLower, tickUpper);
+
+            uint delta0 = uint(int(delta.amount0())); 
+            uint delta1 = uint(int(delta.amount1()));
+            vanillaKey.currency0.take(poolManager,
+                    address(this), delta0, false);
+                    mockUSD.burn(delta0);
+            vanillaKey.currency1.take(poolManager,
+                    address(this), delta1, false);
+                    mockETH.burn(delta1);
             
-            // (block.timestamp - LAST_REPACK) TODO calculate APY
+            if (LAST_REPACK > 0) { // extrapolate (guestimate) an annual % yield... 
+                // based on the % fee yield of the last period (in between repacks)
+                YIELD = FullMath.mulDiv(365 days / (block.timestamp - LAST_REPACK),
+                    uint(int(fees.amount0())) * 1e12 + FullMath.mulDiv(price, 
+                    uint(int(fees.amount1())), WAD), // < total fees in $
+                    delta0 * 1e12 + FullMath.mulDiv(price, delta1, WAD));
+            }
             USD_FEES += uint(int(fees.amount1()));
             ETH_FEES += uint(int(fees.amount0()));
             LAST_REPACK = block.timestamp;
@@ -501,15 +524,10 @@ contract MO is SafeCallback, Ownable {
             (tickLower,, 
              tickUpper,) = _updateTicks(sqrtPriceX96, 200);
             UPPER_TICK = tickUpper; LOWER_TICK = tickLower;
-
-            (uint delta0, // TODO we are currently adding more than we deposit!
-             uint delta1) = _addLiquidityHelper(uint(int(delta.amount0())), 0,
-                                                getPrice(sqrtPriceX96, false));
-            delta = _modLP(delta0, delta1, tickLower, tickUpper, sqrtPriceX96);
-            /*
-            delta0 = uint(int(delta0) + delta.amount0()); 
-            delta1 = uint(int(delta1) + delta.amount1());
-            require(delta0 == 0 && delta1 == 0, "repack"); */
+            (delta0, delta1) = _addLiquidityHelper(
+                                  0, delta1, price);
+            delta = _modLP(delta0, delta1, tickLower, 
+                            tickUpper, sqrtPriceX96);
         } 
         else if (discriminant == Action.OutsideRange) {
             (address sender, int liquidity, 
@@ -518,12 +536,9 @@ contract MO is SafeCallback, Ownable {
             
             who = sender; inRange = false;
             (delta, ) = _modifyLiquidity(liquidity, 
-                            tickLower, tickUpper);    
-            /*
-            delta0 = uint(int(delta.amount0())); 
-            delta1 = uint(int(delta.amount1())); */
+                            tickLower, tickUpper);
         }
-        else if (discriminant == Action.ModLP) {
+        else if (discriminant == Action.ModLP) { 
             (uint160 sqrtPriceX96, uint delta1, uint delta0,
             int24 tickLower, int24 tickUpper) = abi.decode(
             data[32:], (uint160, uint, uint, int24, int24));  
@@ -532,8 +547,8 @@ contract MO is SafeCallback, Ownable {
         } 
         if (delta.amount0() > 0) { uint delta0 = uint(int(delta.amount0()));
             vanillaKey.currency0.take(poolManager, address(this), delta0, false);
-            GD.take(who, delta0, out); mockUSD.burn(delta0);             
-            if (inRange) POOLED_USD -= delta0;
+            require(stdMath.delta(delta0, GD.take(who, delta0, out)) <= 5, "$0");
+            mockUSD.burn(delta0); if (inRange) POOLED_USD -= delta0;
         }
         else if (delta.amount0() < 0) { 
             uint delta0 = uint(int(-delta.amount0())); mockUSD.mint(delta0); 
@@ -542,8 +557,7 @@ contract MO is SafeCallback, Ownable {
         }
         if (delta.amount1() > 0) { uint delta1 = uint(int(delta.amount1()));
             vanillaKey.currency1.take(poolManager, address(this), delta1, false);
-            mockETH.burn(delta1); unRex(delta1);
-            if (inRange) POOLED_ETH -= delta1;
+            mockETH.burn(delta1); unRex(delta1); if (inRange) POOLED_ETH -= delta1;
         }
         else if (delta.amount1() < 0) { 
             uint delta1 = uint(int(-delta.amount1())); mockETH.mint(delta1); 
@@ -556,12 +570,14 @@ contract MO is SafeCallback, Ownable {
     fallback() external payable {} // redeem triggers this, but it's
     // fine to leave the implementation blank; swap() handles transfer
     function unRex(uint howMuch) internal returns (uint amount) {
-        amount = Math.min(rexVault.balanceOf(address(this)), 
-                          rexVault.convertToShares(howMuch));
+        uint fee = 2 * rex.fees(IPirexETH.Fees.InstantRedemption);
+        amount = Math.min(rexVault.balanceOf(address(this)),
+                          rexVault.convertToShares(howMuch +
+                          FullMath.mulDiv(howMuch, fee, 1e6)));
 
         amount = rexVault.redeem(amount, address(this), address(this));
         (amount,) = rex.instantRedeemWithPxEth(amount, address(this));
-        if (amount > howMuch) { rex.deposit{value: amount - howMuch}
+        if (amount > howMuch) {rex.deposit{value: amount - howMuch}
                                             (address(this), true);
             amount = howMuch;
         }
@@ -572,129 +588,153 @@ contract MO is SafeCallback, Ownable {
     // if there is more liquidity
     // managed by our router than 
     // the v3 pool, use range orders
-    function unwind(bool zeroForOne, address who) isInitialised external {
-        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0(); 
-        int price = int(getPrice(sqrtPriceX96, true)); 
-        
-        viaAAVE memory pledge; 
-        uint buffer; uint reUP; 
-        if (zeroForOne) { 
+    function unwind(bool zeroForOne,
+        address who) isInitialised external {
+        viaAAVE memory pledge; uint buffer; uint reUP;
+        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
+        int price = int(getPrice(sqrtPriceX96, true));
+        if (zeroForOne) {
             pledge = pledgesZeroForOne[who];
-            int delta = (price - pledge.price) 
-                         * 100 / pledge.price;
-
-            if (delta <= -5 || delta >= 5) {
-                if (pledge.borrowed > 0) { // supplied is USDC
-                    reUP = unRex(pledge.borrowed);
-                    if (reUP < pledge.borrowed) {
-                        reUP = FullMath.mulDiv(pledge.borrowed - reUP, uint(price), 1e12);
-                        /* TODO if we have USDE borrow USDC against it to buy ETH 
-                        require(reUP == GD.take(address(this), reUP, address(USDC), "$unwind"));
-                        v3Router.exactInput(ISwapRouter.ExactInputParams(
-                            abi.encodePacked(address(USDC), uint24(500), address(weth)), 
-                            address(this), block.timestamp, reUP, amount - amount / 300));
-                        */
-                    }
-                    weth.deposit{ value: pledge.borrowed }();
-                    _unwind(address(weth), address(USDC), 
+            int delta = (price - pledge.price)
+                        * 1000 / pledge.price;
+            if (delta <= -49 || delta >= 49) {
+                // supplied is in USDC...
+                if (pledge.borrowed > 0) {
+                    weth.deposit{ value: unRex(pledge.borrowed) }();
+                    _unwind(address(weth), address(USDC),
                         pledge.borrowed, pledge.supplied);
-                    
-                    buffer = FullMath.mulDiv(pledge.borrowed, 
-                                        uint(pledge.price), 1e12);
-                    if (delta <= -5) {
-                        require(buffer == GD.take(address(this), 
-                            buffer, address(USDC)), "$buffer");
+                        // debt gets paid off regardless
 
-                        reUP = FullMath.mulDiv(1e12, pledge.supplied + buffer, uint(price));
-                        pledge.supplied = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                            abi.encodePacked(address(USDC), uint24(500), address(weth)), 
-                            address(this), block.timestamp, pledge.supplied + buffer, 
-                            reUP - reUP / 300));    
-                    } else { // buffer is in USDC
-                        pledge.buffer = pledge.supplied + buffer;
-                        pledge.supplied = 0;
+                    require(stdMath.delta(USDC.balanceOf(address(this)),
+                          pledge.supplied) <= 5, "$supplied0for1");
+                        // ^ we got collateral back from unwinding
+                        // will be spent to buy dip or redeposited
+
+                    if (delta <= -49) { // use all of the dollars we possibly can to buy the dip
+                        buffer = FullMath.mulDiv(pledge.borrowed, uint(pledge.price), WAD * 1e12);
+                        // recovered USDC we got from selling the borrowed ETH
+                        reUP = GD.take(address(this), buffer, address(USDC));
+
+                        require(stdMath.delta(reUP, buffer) <= 5,
+                        "$buffer0for1"); buffer = reUP + pledge.supplied;
+                        reUP = FullMath.mulDiv(WAD, buffer * 1e12, uint(price));
+                        buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
+                            abi.encodePacked(address(USDC), uint24(500), address(weth)),
+                            address(this), block.timestamp, buffer, reUP - reUP / 200));
+                        weth.withdraw(buffer); // TODO PENDING_ETH ?
+                        (pledge.supplied, ) = rex.deposit{value: buffer}
+                                                (address(this), true);
+                        pledge.price = price; // < so we may know when to sell later
+                    } else { // the buffer will be saved in USDC, used to pivot later
+                        buffer = unRex(pledge.buffer); weth.deposit{ value: buffer }();
+                        reUP = FullMath.mulDiv(buffer, uint(price), WAD * 1e12);
+                        buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
+                            abi.encodePacked(address(weth), uint24(500), address(USDC)),
+                            address(this), block.timestamp, buffer, reUP - reUP / 200));
+
+                        reUP = buffer + pledge.supplied; pledge.supplied = 0;
+                        require(reUP == GD.deposit(address(this), address(USDC), reUP));
+                        pledge.buffer = reUP + FullMath.mulDiv(pledge.borrowed,
+                                                uint(pledge.price), WAD * 1e12);
                     }
-                    pledge.borrowed = 0; 
-                    pledge.price = price;  
-                    pledgesZeroForOne[who] = pledge;
-                } 
-                // the following condition is our initial pivot
-                else if (delta <= -5 && pledge.buffer > 0) {
-                    buffer = GD.take(address(this), pledge.buffer, address(USDC));
-                    reUP = FullMath.mulDiv(1e12, buffer, uint(price)); 
-                    pledge.supplied = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                            abi.encodePacked(address(USDC), uint24(500), address(weth)), 
-                            address(this), block.timestamp, buffer, reUP - reUP / 300));
-                    
-                    pledge.price = price; 
+                    pledge.borrowed = 0;
                     pledgesZeroForOne[who] = pledge;
                 }
-                else if (delta >= 5 && pledge.supplied > 0) { // supplied is ETH
-                    reUP = FullMath.mulDiv(pledge.supplied, uint(price), 1e12);
+                // the following condition is our initial pivot
+                else if (delta <= -49 && pledge.buffer > 0) { // try to buy the dip
+                    buffer = GD.take(address(this), pledge.buffer, address(USDC));
+                    require(stdMath.delta(buffer, pledge.buffer) <= 5, "buffer0for1$");
+
+                    reUP = FullMath.mulDiv(WAD, buffer * 1e12, uint(price));
+                    buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
+                        abi.encodePacked(address(USDC), uint24(500), address(weth)),
+                        address(this), block.timestamp, buffer, reUP - reUP / 200));
+
+                    weth.withdraw(buffer);
+                    (pledge.supplied, ) = rex.deposit{value: buffer}
+                                            (address(this), true);
+
+                    pledge.price = price; // < so we know when to sell
+                    pledgesZeroForOne[who] = pledge; // later for profit
+                }
+                else if (delta >= 49 && pledge.supplied > 0) { // supplied is ETH
+                    buffer = unRex(pledge.supplied); weth.deposit{ value: buffer }();
+                    reUP = FullMath.mulDiv(buffer, uint(price), WAD * 1e12);
                     reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(weth), uint24(500), address(USDC)), 
-                        address(this), block.timestamp, pledge.supplied, reUP - reUP / 300));
-                    require(reUP == GD.deposit(address(this), address(USDC), reUP), "$reUP");
-                    delete pledgesZeroForOne[who]; // we completed the Iverson 🏀 sequence... 
+                        abi.encodePacked(address(weth), uint24(500), address(USDC)),
+                        address(this), block.timestamp, buffer, reUP - reUP / 200));
+                    require(reUP == GD.deposit(address(this), address(USDC), reUP));
+                    delete pledgesZeroForOne[who]; // we completed the cross-over 🏀
+                    // TODO measure gain somehow?
                 } 
             }
-        } else { 
+        } else {
             pledge = pledgesOneForZero[who];
-            int delta = (price - pledge.price) 
-                        * 100 / pledge.price;
+            int delta = (price - pledge.price)
+                        * 1000 / pledge.price;
+            if (delta <= -49 || delta >= 49) {
+                if (pledge.borrowed > 0) {
+                    require(stdMath.delta(pledge.borrowed,
+                        GD.take(address(this), pledge.borrowed,
+                        address(USDC))) <= 5, "unwind1for0$");
 
-            if (pledge.borrowed > 0) {
-                if (delta <= -5 || delta >= 5) {
-                    GD.take(address(this), 
-                        pledge.borrowed, address(USDC));
-                    _unwind(address(USDC), address(weth), 
+                    _unwind(address(USDC), address(weth),
                         pledge.borrowed, pledge.supplied);
-                    if (delta >= 5) { // supplied is now in USDC
-                        reUP = FullMath.mulDiv(1e12, pledge.supplied, uint(price));
+
+                    if (delta >= 49) { // after this, supplied will be stored in USDC...
+                        reUP = FullMath.mulDiv(pledge.supplied, uint(price), WAD * 1e12);
                         pledge.supplied = v3Router.exactInput(ISwapRouter.ExactInputParams(
                             abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                            address(this), block.timestamp, pledge.supplied, reUP - reUP / 300));
-                            
-                        GD.deposit(address(this), address(USDC), pledge.supplied);
+                            address(this), block.timestamp, pledge.supplied, reUP - reUP / 200));
+
+                        require(pledge.supplied == GD.deposit(address(this),
+                                address(USDC), pledge.supplied));
+
+                        pledge.price = price;
                     } else { // buffer is in ETH
-                        pledge.buffer = pledge.supplied + buffer;
+                        weth.withdraw(pledge.supplied);
+                        (pledge.buffer,) = rex.deposit{value: buffer}
+                                            (address(this), true);
                         pledge.supplied = 0;
                     }
                     pledge.borrowed = 0;
-                    pledge.price = price;
                     pledgesOneForZero[who] = pledge;
-                } 
-            } // the following condition is our initial pivot
-            else if (delta <= -5 && pledge.supplied > 0) {
-                GD.take(address(this), pledge.supplied, address(USDC));                    
-                reUP = FullMath.mulDiv(1e12, pledge.supplied, uint(price));
-                pledge.buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                    abi.encodePacked(address(USDC), uint24(500), address(weth)), 
-                    address(this), block.timestamp, pledge.supplied, reUP - reUP / 300));
-                    
-                pledge.price = price;
-                weth.withdraw(pledge.buffer);
-                pledgesOneForZero[who] = pledge;
-                _addLiquidity(pledge.buffer, POOLED_USD);
-            }
-            else if (delta >= 5 && pledge.buffer > 0) {
-                reUP = FullMath.mulDiv(uint(price), 
-                        unRex(pledge.buffer), 1e12);
+                }
+                // the following condition is our initial pivot
+                else if (delta <= -49 && pledge.supplied > 0) { // supplied in USDC
+                    require(stdMath.delta(pledge.supplied, GD.take(address(this),
+                        pledge.supplied, address(USDC))) <= 5, "$unwind1for0");
+                    reUP = FullMath.mulDiv(WAD, pledge.supplied * 1e12, uint(price));
+                    pledge.buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
+                        abi.encodePacked(address(USDC), uint24(500), address(weth)),
+                        address(this), block.timestamp, pledge.supplied, reUP - reUP / 200));
 
-                reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                    abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                    address(this), block.timestamp, pledge.buffer, reUP - reUP / 300));
-                
-                GD.deposit(address(this),
-                    address(USDC), reUP); 
-                delete pledgesOneForZero[who];
-            }   
-        }        
+                    pledge.supplied = 0;
+                    pledge.price = price;
+                    weth.withdraw(pledge.buffer);
+                    rex.deposit{value: pledge.buffer}
+                                (address(this), true);
+                    pledgesOneForZero[who] = pledge;
+                }
+                else if (delta >= 49 && pledge.buffer > 0) {
+                    buffer = unRex(pledge.buffer);
+                    reUP = FullMath.mulDiv(uint(price),
+                                    buffer, 1e12 * WAD);
+
+                    reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
+                        abi.encodePacked(address(weth), uint24(500), address(USDC)),
+                        address(this), block.timestamp, buffer, reUP - reUP / 200));
+                        require(reUP == GD.deposit(address(this), address(USDC), reUP));
+
+                    delete pledgesOneForZero[who];
+                }
+            }
+        }
     }
 
-    function _unwind(address repay, address out, 
+    function _unwind(address repay, address out,
         uint borrowed, uint supplied) internal {
-        USDC.approve(address(aave), borrowed);
+        IERC20(repay).approve(address(aave), borrowed);
         aave.repay(repay, borrowed, 2, address(this));  
         aave.withdraw(out, supplied, address(this));
     }
@@ -773,7 +813,7 @@ contract MO is SafeCallback, Ownable {
                        FixedPointMathLib.sqrt(1e18)));
     }
 
-    function _repack() internal returns (uint160 sqrtPriceX96, 
+    function _repack() internal returns (uint160 sqrtPriceX96,
         int24 tickLower, int24 tickUpper, uint128 myLiquidity) { 
         int24 currentTick; PoolId id = vanillaKey.toId();
         myLiquidity = poolManager.getLiquidity(id);
@@ -784,8 +824,8 @@ contract MO is SafeCallback, Ownable {
         if (currentTick > tickUpper || currentTick < tickLower) {
             if (myLiquidity > 0) { // remove, then add liquidity
                 poolManager.unlock(abi.encode(Action.Repack, 
-                    myLiquidity, sqrtPriceX96, 
-                    tickLower, tickUpper));
+                                  myLiquidity, sqrtPriceX96, 
+                                    tickLower, tickUpper));
             } else {
                 (tickLower,, 
                 tickUpper,) = _updateTicks(sqrtPriceX96, 200);
