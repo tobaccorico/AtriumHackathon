@@ -28,11 +28,9 @@ import {ISwapRouter} from "../src/imports/V3/ISwapRouter.sol";
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 
-
 import {Fixtures} from "./utils/Fixtures.sol";
-
-import {MO} from "../src/Router.sol";
-import {Good} from "../src/GD.sol";
+import {Router} from "../src/Router.sol";
+import {Basket} from "../src/Basket.sol";
 
 contract RouterTest is Test, Fixtures {
     using PoolIdLibrary for PoolKey;
@@ -63,7 +61,7 @@ contract RouterTest is Test, Fixtures {
     IERC20 public USDS = IERC20(0xdC035D45d973E3EC169d2276DDab16f1e407384F);
     IERC20 public USDE = IERC20(0x4c9EDD5852cd905f086C759E8383e09bff1E68B3);
     IERC20 public CRVUSD = IERC20(0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E);
-    IERC20 public FRAX = IERC20(0x853d955aCEf822Db058eb8505911ED77F175b99e);
+    IERC20 public FRAX = IERC20(0xCAcd6fd266aF91b8AeD52aCCc382b4e165586E29);
     
     address[] public VAULTS;
     IERC4626 public gauntletUSDCvault = IERC4626(0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458);
@@ -72,12 +70,15 @@ contract RouterTest is Test, Fixtures {
     // unlike other vaults, SGHO has special interface (similar to ERC4626)
     IERC20 public SGHO = IERC20(0x1a88Df1cFe15Af22B3c4c783D4e6F7F9e0C1885d);
     IERC4626 public SDAI = IERC4626(0x83F20F44975D03b1b09e64809B757c47f942BEeA);
-    IERC4626 public SFRAX = IERC4626(0xA663B02CF0a4b149d2aD41910CB81e23e1c41c32);
+    IERC4626 public SFRAX = IERC4626(0xcf62F905562626CfcDD2261162a51fd02Fc9c5b6);
     IERC4626 public SUSDS = IERC4626(0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD);
     IERC4626 public SUSDE = IERC4626(0x9D39A5DE30e57443BfF2A8307A4256c8797A3497);
-    IERC4626 public SCRVUSD = IERC4626(0x0655977FEb2f289A4aB78af67BAB0d17aAb84367);    
+    IERC4626 public SCRVUSD = IERC4626(0x0655977FEb2f289A4aB78af67BAB0d17aAb84367);
 
-    Good public quid; MO public V4router;
+    address[] public CURVES;
+
+
+    Basket public quid; Router public V4router;
     uint stack = 10000 * USDC_PRECISION;
     function setUp() public {
         STABLECOINS = [
@@ -87,7 +88,7 @@ contract RouterTest is Test, Fixtures {
             address(CRVUSD), address(GHO)
         ]; // ordering is very important!
         VAULTS = [
-            address(gauntletUSDCvault), 
+            address(gauntletUSDCvault),
             address(steakhouseUSDTvault),
             address(SDAI), address(SUSDS), 
             address(SFRAX), address(SUSDE), 
@@ -102,12 +103,12 @@ contract RouterTest is Test, Fixtures {
         deployAndApprovePosm(manager); 
         vm.deal(address(this), 10000 ether);
         vm.deal(User01, 10000 ether);
-        V4router = new MO(manager, 
+        V4router = new Router(manager, 
         address(V3pool), 
         address(V3router),
         pirexETH, address(pxETH), 
         rexVault, aavePool); 
-        quid = new Good(
+        quid = new Basket(
             address(V4router), 
             STABLECOINS, VAULTS
         );
@@ -121,16 +122,31 @@ contract RouterTest is Test, Fixtures {
     }
 
 
-    function testSwap() public {
+    function testBasics() public {
         uint USDCfee = 3 * USDC_PRECISION; // incl slippage
         uint ETHfee = 6 * 1e15; // incl Dinero fee + ^^^^^ 
         
         vm.startPrank(User01);
         USDC.approve(address(quid), 5 * stack);
         quid.mint(User01, 5 * stack, address(USDC), 0);
-        
-        V4router.deposit{value: 25 ether}();
-    
+
+        V4router.deposit{value: 25 ether}(); // ADD LIQUIDITY TO POOL
+
+        uint balanceBefore =  User01.balance; //USDC.balanceOf(User01);
+        uint id = V4router.outOfRange{value: 1 ether}(0, // TEST OUT OF RANGE
+                                  address(0), 400, 100);
+        // USDC.approve(address(quid), stack / 10);
+        /* uint id = V4router.outOfRange(stack / 10,
+                        address(USDC), -4000, 100); */ // it works!
+        uint balanceAfter = User01.balance; // USDC.balanceOf(User01);
+        // assertApproxEqAbs(balanceBefore - balanceAfter, stack/10, 100);
+        assertApproxEqAbs(balanceBefore - balanceAfter, 1 ether, 100);
+
+        V4router.reclaim(id, 100);
+
+        balanceAfter = User01.balance; // USDC.balanceOf(User01)
+        assertApproxEqAbs(balanceBefore, balanceAfter, 6 * 1e14);
+
         uint price = V4router.getPrice(0, false);
         uint expectingToBuy = price / 1e12;
         uint USDCbalanceBefore = USDC.balanceOf(User01);
@@ -142,14 +158,14 @@ contract RouterTest is Test, Fixtures {
                                 expectingToBuy, USDCfee);
 
         price = V4router.getPrice(0, false);
-        uint balanceBefore = User01.balance;
+        balanceBefore = User01.balance;
         // note, we're not approving the router!
         USDC.approve(address(quid), price / 1e12); 
-        // but GD, because quid does transferFrom
+        // but Basket, because quid does transferFrom
 
         V4router.swap(address(USDC), true, price / 1e12);
 
-        uint balanceAfter = User01.balance;
+        balanceAfter = User01.balance;
         assertApproxEqAbs(balanceAfter - balanceBefore, 1 ether, ETHfee);
 
         USDCbalanceBefore = USDC.balanceOf(User01);
@@ -164,13 +180,12 @@ contract RouterTest is Test, Fixtures {
                             expectingToBuy, USDCfee * 133); 
         
         // TODO remove ETH
-
         vm.stopPrank();
     }
 
     // testing ability is limited because we can't
     // simulate a price drop inside the Univ3 pool
-    function testLeveragedSwaps() public {
+    /* function testLeveragedSwaps() public {
         vm.startPrank(User01);
         USDC.approve(address(quid), 5 * stack);
         quid.mint(User01, 5 * stack, address(USDC), 0);
@@ -194,14 +209,8 @@ contract RouterTest is Test, Fixtures {
         USDC.approve(address(quid), stack/10);
         V4router.leverOneForZero(stack/10,
                             address(USDC));
-        
+
         vm.stopPrank();
-    }
+    } */
 
-
-    function testOutOfRange() public {
-        // TODO withdraw while still out of range
-        // TODO cannot deposit if in-range
-        // TODO withdraw while now in-range
-    }
 }

@@ -27,13 +27,19 @@ interface IStakeToken is IERC20 { // StkGHO (safety module)
              external view returns (uint256);
 }
 
-import {MO} from  "./Router.sol"; 
-contract Good is // stable basket
+interface ICurvePool {
+    function add_liquidity(uint256[2] calldata amounts, uint256 deadline) external;
+    function remove_liquidity(uint256 _amount, uint256 deadline, uint256[2] calldata min_amounts) external;
+
+}
+
+import {Router} from  "./Router.sol"; 
+contract Basket is
     ReentrancyGuard, ERC6909 { 
     using SafeTransferLib for IERC20;
     using SafeTransferLib for IERC4626;
     using SortedSetLib for SortedSetLib.Set;
-    
+
     uint constant WAD = 1e18;
     address[] public stables;
     
@@ -42,10 +48,10 @@ contract Good is // stable basket
     uint private _totalSupply;
     Metrics private coreMetrics;
     string private _name = "QU!D";
-    string private _symbol = "GD";
-    address payable public Mindwill;
-    
-    struct Metrics { 
+    string private _symbol = "QD";
+    address payable public V4;
+
+    struct Metrics {
         uint last; uint total; uint yield;
     }
     struct Pod { uint credit; uint debit; }
@@ -63,7 +69,7 @@ contract Good is // stable basket
 
     modifier onlyUs { 
         address sender = msg.sender;
-        require(sender == Mindwill ||
+        require(sender == V4 ||
                 sender == address(this), "!?"); _;
     }
 
@@ -135,9 +141,9 @@ contract Good is // stable basket
             if (batches[i] <= currentMonth()) 
                 break;
         }
-    } 
+    }
 
-    constructor(address _mo, 
+    constructor(address _router,
         address[] memory _stables, 
         address[] memory _vaults) { 
         _deployed = block.timestamp; _deployer = msg.sender;
@@ -147,7 +153,7 @@ contract Good is // stable basket
             stable = _stables[i]; vault = _vaults[i];
             isVault[vault] = true; vaults[stable] = vault;
             isStable[stable] = true;
-        }   Mindwill = payable(_mo); 
+        }   V4 = payable(_router);
     }
     
     function get_total_deposits(bool force) 
@@ -176,7 +182,8 @@ contract Good is // stable basket
         uint ghoIndex = stables.length - 1;
         for (uint i = 0; i < ghoIndex; i++) { 
             uint multiplier = i > 1 ? 1 : 1e12;
-            // ^ scale precision for USDC/USDT 
+            // ^ scale precision for USDC/USDT
+            // because the rest are all 1e18
             vault = vaults[stables[i]];
             shares = perVault[vault].debit;
             if (shares > 0) { 
@@ -202,14 +209,14 @@ contract Good is // stable basket
             uint[10] memory amounts = get_deposits();
             uint total = amounts[0]; address vault;
             uint ghoIndex = stables.length;
-            for (uint i = 1; i < ghoIndex; i++) { 
+            for (uint i = 1; i < ghoIndex; i++) {
                 uint divisor = i > 1 ? 1 : 1e12;
                 amounts[i] = FullMath.mulDiv(amount, FullMath.mulDiv(
                                         WAD, amounts[i], total), WAD);
                 amounts[i] /= divisor;
-                if (amounts[i] > 0) { vault = vaults[stables[i - 1]]; 
+                if (amounts[i] > 0) { vault = vaults[stables[i - 1]];
                     amounts[i] = withdraw(who, vault, amounts[i]);
-                    sent += amounts[i];  
+                    sent += amounts[i];
                 } 
             } vault = vaults[stables[stables.length - 1]]; 
             
@@ -222,16 +229,21 @@ contract Good is // stable basket
                 require(IStakeToken(vault).previewRedeem(amount) == amounts[ghoIndex], "sgho");
                 IStakeToken(vault).redeem(who, amount); sent += amounts[ghoIndex];
             }
+            // sent /= 1e12;
         } else { // TODO swap through Curve if we don't have enough of the token we need?
+            uint scale = 18 - IERC20(token).decimals();
+            amount = scale > 0 ? amount / (10 ** scale) : amount;
             return withdraw(who, vaults[token], amount);
-        }   
+        }
     }
 
     function withdraw(address to, address vault, uint amount) internal returns (uint sent) {
         uint sharesWithdrawn = Math.min(IERC4626(vault).balanceOf(address(this)),
                                         IERC4626(vault).convertToShares(amount));
-        
+        console.log("sharesBalance", IERC4626(vault).balanceOf(address(this)));
+        console.log("amountConvertToShares", IERC4626(vault).convertToShares(amount));
         sent = IERC4626(vault).convertToAssets(sharesWithdrawn);
+        console.log("SENT", sent);
         require(sent == IERC4626(vault).redeem(sharesWithdrawn, to,
                                             address(this)), "take");
         perVault[vault].credit -= sent;
@@ -297,7 +309,7 @@ contract Good is // stable basket
 
     /**
      * @dev the cost of minting depends on
-     * how much risk is encumbered in MO,
+     * how much risk is encumbered in Router,
      * as well as total demand to mint,
      * and, finally, bonding duration
      * @param pledge is on whose behalf...
@@ -309,24 +321,24 @@ contract Good is // stable basket
         address token, uint when) public 
         nonReentrant { uint month = _til(when);
         if (token == address(this)) {
-            require(msg.sender == Mindwill, "403");
+            require(msg.sender == V4, "403");
             _mint(pledge, month, amount);
-        }   
+        }
         else { 
             // uint cost = amount / 2; // TODO math
             uint paid = deposit(pledge, token, amount);
             _mint(pledge, month, amount);
-            // MO(Mindwill).mint(pledge, cost, amount);
+            // Router(V4).mint(pledge, cost, amount);
         }
     }
 
     function transferFrom(address from, 
         address to, uint amount) public 
         returns (bool) {
-        if (msg.sender != from 
+        if (msg.sender != from
             && !isOperator[from][msg.sender]) {
-            if (to == Mindwill) {
-                require(msg.sender == Mindwill, "403");
+            if (to == V4) {
+                require(msg.sender == V4, "403");
             }    
             uint256 allowed = _allowances[from][msg.sender];
             if (allowed != type(uint256).max) {
@@ -337,12 +349,12 @@ contract Good is // stable basket
 
     function turn(address from, // whose balance
         uint value) public returns (uint) {
-        require(msg.sender == Mindwill, "403");
+        require(msg.sender == V4, "403");
         uint oldBalanceFrom = totalBalances[from];
         uint sent = _transferHelper(
         from, address(0), value);
         // carry.debit will be untouched here...
-        // return MO(Mindwill).transferHelper(from,
+        // return Router(V4).transferHelper(from,
         //     address(0), sent, oldBalanceFrom);
     }
 
@@ -359,7 +371,7 @@ contract Good is // stable basket
         // if i = 0 then this will either give us one iteration,
         // or exit with index out of bounds, both make sense...
         bool toZero = to == address(0);
-        bool burning = toZero || to == Mindwill;
+        bool burning = toZero || to == V4;
         int i = toZero ? 
             int(matureBatches(batches)) :
             int(batches.length - 1);
@@ -412,11 +424,11 @@ contract Good is // stable basket
                 from, to, amount);
         
         uint sent = 0;
-        // uint sent = MO(Mindwill).transferHelper(
+        // uint sent = Router(V4).transferHelper(
         //      from, to, value, oldBalanceFrom);
         
         if (value != sent) { // this is only for
-        // the situation where to == address(MO): 
+        // the situation where to == address(V4): 
         // burning debt, and in the case where we 
         // tried to burn more than was available
             value -= sent; // value is now excess

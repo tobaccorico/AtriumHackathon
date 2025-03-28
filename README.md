@@ -39,7 +39,9 @@ dollars are either in Morpho vaults or their
 native staking (e.g. GHO’s safety module).  
 
 **In order for this to be successful in prod**  
-**Dinero DAO must vote to cut fees 100x**
+**Dinero DAO must vote to cut fees 100x**  
+*(otherwise, comment out feature or replace  
+with someting like mevETH or another LST)*  
 
 The utility token, GD, is considered  
 the LP token for our "stable basket" 🏀   

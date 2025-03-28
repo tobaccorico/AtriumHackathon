@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Good} from "./GD.sol";
+import {Basket} from "./Basket.sol";
 import {mockToken} from "./mockToken.sol";
 
 import {IPirexETH} from "./imports/IPirexETH.sol";
@@ -23,6 +23,7 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
+import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
@@ -38,7 +39,7 @@ import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
 import "lib/forge-std/src/console.sol"; // TODO remove
 
-contract MO is SafeCallback, Ownable {
+contract Router is SafeCallback, Ownable {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using TransientStateLibrary for IPoolManager;
@@ -53,8 +54,8 @@ contract MO is SafeCallback, Ownable {
     // for our v4 pool ETH is token1
     ISwapRouter v3Router; // fallback
     
+    IPirexETH rex; Basket quid;
     IERC20 pxETH; IERC4626 rexVault;
-    IPirexETH rex; Good GD; // basket
     IERC20 USDC; WETH weth; IPool aave;
     mockToken mockETH; mockToken mockUSD;
     mapping(address => uint[]) positions;
@@ -95,6 +96,10 @@ contract MO is SafeCallback, Ownable {
     // use ring buffer to average
     // out the yield over a week
 
+    event PrintDelta(int,int);
+    event PrintOldTicks(int24,int24);
+    event PrintNewTicks(int24,int24);
+
     // _unlockCallback    
     enum Action { Swap, 
         Repack, ModLP, 
@@ -130,11 +135,11 @@ contract MO is SafeCallback, Ownable {
     }
 
     modifier isInitialised {
-        require(address(GD) != address(0), "init"); _;
+        require(address(quid) != address(0), "init"); _;
     }
 
     modifier onlyQuid {
-        require(msg.sender == address(GD), "403"); _;
+        require(msg.sender == address(quid), "403"); _;
     }
 
     // must send $1 USDC to address(this) & attach msg.value 1 wei
@@ -148,25 +153,26 @@ contract MO is SafeCallback, Ownable {
             mockETH = tokenTemporary; mockUSD = temporaryToken;
         }
         require(mockUSD.decimals() == 6, "1e6");
-        require(address(GD) == address(0), "GD"); 
-        GD = Good(_quid); vanillaKey = PoolKey({
+        require(address(quid) == address(0), "quid");
+        quid = Basket(_quid); vanillaKey = PoolKey({
             currency0: Currency.wrap(address(mockUSD)),
             currency1: Currency.wrap(address(mockETH)),
             fee: 420, tickSpacing: 10,
             hooks: IHooks(address(0))
         }); renounceOwnership();    
 
-        require(GD.Mindwill() == address(this), "!");
+        // GDR (a.k.a global depositary receipt)
+        require(quid.V4() == address(this), "!");
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
         poolManager.initialize(vanillaKey, sqrtPriceX96);
-        USDC.approve(address(GD), type(uint256).max);
-        // ^ just for calling GD.deposit in unwind()
+        USDC.approve(address(quid), type(uint256).max);
+        // ^ just for calling quid.deposit in unwind()
 
         mockUSD.approve(address(poolManager),
                         type(uint256).max);
         USDC.approve(address(v3Router),
                     type(uint256).max);
-        mockETH.approve(address(poolManager), 
+        mockETH.approve(address(poolManager),
                         type(uint256).max);
         weth.approve(address(v3Router), 
                     type(uint256).max);
@@ -199,7 +205,7 @@ contract MO is SafeCallback, Ownable {
                                          price, WAD);
         require(totalValue > 50 * WAD, "grant");
         totalValue /= 1e12; // 1e6 precision
-        uint took = GD.take(address(this),
+        uint took = quid.take(address(this),
                 totalValue, address(USDC));
 
         require(stdMath.delta(totalValue, took) <= 5, "0for1$");
@@ -212,10 +218,10 @@ contract MO is SafeCallback, Ownable {
         amount = v3Router.exactInput(ISwapRouter.ExactInputParams(
             abi.encodePacked(address(weth), uint24(500), address(USDC)),
             address(this), block.timestamp, borrowing, amount - amount / 200));
-            require(amount == GD.deposit(address(this), address(USDC), amount));
+            require(amount == quid.deposit(address(this), address(USDC), amount));
 
         uint withProfit = totalValue + totalValue / 30;
-        GD.mint(msg.sender, withProfit, address(GD), 0);
+        quid.mint(msg.sender, withProfit, address(quid), 0);
         pledgesZeroForOne[msg.sender] = viaAAVE({
             supplied: totalValue, borrowed: borrowing,
             buffer: buffer, price: int(price) });
@@ -226,7 +232,7 @@ contract MO is SafeCallback, Ownable {
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
         uint price = getPrice(sqrtPriceX96, true);
 
-        amount = GD.deposit(msg.sender, token, amount);
+        amount = quid.deposit(msg.sender, token, amount);
         uint withProfit = amount + amount / 30;
 
         uint inETH = FullMath.mulDiv(WAD,
@@ -240,92 +246,95 @@ contract MO is SafeCallback, Ownable {
         amount = FullMath.mulDiv(inETH * 7 / 10, price, WAD * 1e12);
         aave.borrow(address(USDC), amount, 2, 0, address(this));
         
-        require(amount == GD.deposit(address(this),
+        require(amount == quid.deposit(address(this),
                 address(USDC), amount));
 
-        GD.mint(msg.sender, withProfit, address(GD), 0);
+        quid.mint(msg.sender, withProfit, address(quid), 0);
         pledgesOneForZero[msg.sender] = viaAAVE({ 
             supplied: inETH, borrowed: amount,
             buffer: 0, price: int(price) });
     }
-    
+
+    // "distance" is how far away from current price
+    // measured in ticks (100 = 1%); negative = add
     function outOfRange(uint amount, address token,
-        uint price, uint range) isInitialised
-        public payable { require(range > 100
-            && range < 5000 && range % 50 == 0, "width");
-        (,int24 lowerTick, int24 upperTick,) = _repack();
-        uint160 sqrtPriceX96 = getSqrtPriceX96(price);
-        
+        int24 distance, uint range) isInitialised
+        public payable returns (uint next) {
+        require(distance % 200 == 0 && distance != 0
+            && (distance >= -5000 || distance <= 5000), "distance");
+        require(range >= 100 && range <= 1000 && range % 50 == 0, "width");
+
+        (uint160 sqrtPriceX96,
+        int24 lowerTick, int24 upperTick,) = _repack();
+        sqrtPriceX96 = TickMath.getSqrtPriceAtTick(
+            TickMath.getTickAtSqrtPrice(sqrtPriceX96)
+            - int24(distance) // shift away from current
+            // price using tick value +/- 2-50% going in
+            // increments of 1 % (half a % for the range)
+        );
          int liquidity; bool isStable;
         (int24 tickLower, uint160 lower,
          int24 tickUpper, uint160 upper) = _updateTicks(
                                     sqrtPriceX96, range);
         if (token == address(0)) {
-            require(tickLower > upperTick, "right");
+            require(lowerTick > tickUpper, "right");
             (amount, ) = rex.deposit{value: msg.value}
                             (address(this), true);
-            
             liquidity = int(uint(
-                LiquidityAmounts.getLiquidityForAmounts(
-                    sqrtPriceX96, lower, upper, amount, 0
+                LiquidityAmounts.getLiquidityForAmount1(
+                    lower, upper, amount
                 )));
-        } else { 
-            require(lowerTick > tickUpper, "left");
-            amount = GD.deposit(msg.sender,
+        } else {
+            require(tickLower > upperTick, "left");
+            amount = quid.deposit(msg.sender,
                             token, amount);
             isStable = true;
             liquidity = int(uint(
-                LiquidityAmounts.getLiquidityForAmounts(
-                    sqrtPriceX96, lower, upper, 0, amount
+                LiquidityAmounts.getLiquidityForAmount0(
+                    lower, upper, amount
                 )));
         }
         SelfManaged memory newPosition = SelfManaged({
             owner: msg.sender, lower: tickLower, 
             upper: tickUpper, liq: liquidity
         });
-        uint next = tokenId + 1;
+        next = tokenId + 1;
         selfManaged[next] = newPosition;
         positions[msg.sender].push(next);
         tokenId = next;
-        
+
         BalanceDelta delta = abi.decode(
             poolManager.unlock(abi.encode(
-                Action.OutsideRange, liquidity, 
+                Action.OutsideRange, msg.sender, liquidity,
                 tickLower, tickUpper)), (BalanceDelta));
-
-        /* require(-delta.amount0() == int(amount) || (isStable &&
-                -delta.amount1() == int(amount)), "re-arrange"); */
+                uint ethBalance = address(this).balance;
     }
 
-    function reclaim(uint id, int percent) 
-        isInitialised external returns (BalanceDelta delta) {
+    function reclaim(uint id, int percent) isInitialised
+        external returns (BalanceDelta delta) {
         SelfManaged memory position = selfManaged[id];
-        
         require(position.owner == msg.sender, "403");
         require(percent > 0 && percent < 101, "%");
-        
         int liquidity = position.liq * percent / 100;
         uint[] storage myIds = positions[msg.sender];
-        
-        delta = abi.decode(poolManager.unlock(
-                abi.encode(Action.OutsideRange,
-                msg.sender, -liquidity, position.lower, 
-                position.upper)), (BalanceDelta));
-                uint lastIndex = myIds.length - 1;
-                
+        uint lastIndex = myIds.length - 1;
         if (percent == 100) { delete selfManaged[id];
             for (uint i = 0; i <= lastIndex; i++) {
-                if (myIds[i] == id) { 
+                if (myIds[i] == id) {
                     if (i < lastIndex) {
                         myIds[i] = myIds[lastIndex];
-                    }
-                    myIds.pop(); break;
+                    }   myIds.pop(); break;
                 }
             }
-        } else {
-            position.liq -= liquidity;
+        } else {    position.liq -= liquidity;
+            require(position.liq > 0, "reclaim");
             selfManaged[id] = position;
-        } // TODO unRex
+        }
+        delta = abi.decode(poolManager.unlock(
+                abi.encode(Action.OutsideRange,
+                msg.sender, -liquidity, position.lower,
+                position.upper)), (BalanceDelta));
+
     }
 
     function deposit() isInitialised external payable {
@@ -348,7 +357,7 @@ contract MO is SafeCallback, Ownable {
 
     function _addLiquidityHelper(uint delta0, uint delta1, uint price) internal 
         returns (uint, uint) { uint pending = PENDING_ETH + delta1; // < queued
-        uint surplus = GD.get_total_deposits(true) - delta0;
+        uint surplus = quid.get_total_deposits(true) - delta0;
         delta1 = Math.min(pending,
              FullMath.mulDiv(surplus * 1e12, WAD, price));
         if (delta1 > 0) { 
@@ -358,14 +367,6 @@ contract MO is SafeCallback, Ownable {
         PENDING_ETH = pending;
         return (delta0, delta1);
     }
-
-    function getSqrtPriceX96(uint price) public
-        pure returns (uint160 sqrtPriceX96) {
-        uint ratioX128 = FullMath.mulDiv(price, 1 << 128, WAD);
-        sqrtPriceX96 = uint160(FixedPointMathLib.sqrt(
-            FullMath.mulDiv(ratioX128, 1 << 64, 1 << 128)
-        ));
-    } // ^ TODO double check implementation
 
     // TODO remove (for testing purposes only)
     function set_price_eth(bool up) external {
@@ -406,14 +407,14 @@ contract MO is SafeCallback, Ownable {
         isInitialised public payable returns (BalanceDelta) { 
         (uint160 sqrtPriceX96,,,) = _repack();
         uint price = getPrice(sqrtPriceX96, false);
-        bool isStable = GD.isStable(token);
+        bool isStable = quid.isStable(token);
         // if this is true ^ user cares
         // about their output being all
         // in 1 specific token, so they 
-        // won't get a balanced quantity 
+        // won't get a balanced quantity
         uint value; uint remains;
         if (!zeroForOne) { 
-            require(token == address(GD) || isStable, "$!");
+            require(token == address(quid) || isStable, "$!");
             value = FullMath.mulDiv(msg.value, price, WAD); 
             require(value >= 50 * WAD, "grant");
             if (value > POOLED_USD * 1e12) { 
@@ -438,7 +439,7 @@ contract MO is SafeCallback, Ownable {
             }
             (amount, ) = rex.deposit{value: amount}(address(this), true);
         } else {
-            amount = GD.deposit(msg.sender, token, amount);
+            amount = quid.deposit(msg.sender, token, amount);
             uint scale = 18 - IERC20(token).decimals();
             value = scale > 0 ? amount * 10 ** scale : amount;
             // value is in ETH, and amount is in dollars
@@ -449,9 +450,8 @@ contract MO is SafeCallback, Ownable {
 
                 remains = amount - value; amount = value;
                 value = FullMath.mulDiv(WAD, remains, price);
-
-                require(stdMath.delta(remains, GD.take(address(this),
-                        remains, address(USDC))) <= 5, "$swap");
+                require(stdMath.delta(remains, quid.take(
+                address(this), remains, address(USDC))) <= 5);
 
                 weth.withdraw(v3Router.exactInput(ISwapRouter.ExactInputParams(
                     abi.encodePacked(address(USDC), uint24(500), address(weth)),
@@ -463,22 +463,19 @@ contract MO is SafeCallback, Ownable {
                     Action.Swap, sqrtPriceX96,
                     msg.sender, zeroForOne, amount, 
                     token)), (BalanceDelta));
-
-            uint ethBalance = address(this).balance;
-            if (ethBalance > 0) { 
-                CurrencyLibrary.ADDRESS_ZERO.transfer(
-                               msg.sender, ethBalance); }
         }
     }
 
     function _unlockCallback(bytes calldata data) 
         internal override returns (bytes memory) {
-        uint8 firstByte; BalanceDelta delta; 
-        address who = address(this); assembly { 
+        uint8 firstByte; BalanceDelta delta;
+        address who = address(this); assembly {
             let word := calldataload(data.offset)
             firstByte := and(word, 0xFF)
-        } Action discriminant = Action(firstByte);
-        bool inRange = true; address out;
+        }
+        Action discriminant = Action(firstByte);
+        address out = address(quid);
+        bool inRange = true;
         if (discriminant == Action.Swap) {
             (uint160 sqrtPriceX96, address sender, 
             bool zeroForOne, uint amount, address token) = abi.decode(
@@ -533,10 +530,11 @@ contract MO is SafeCallback, Ownable {
             (address sender, int liquidity, 
             int24 tickLower, int24 tickUpper) = abi.decode(
                     data[32:], (address, int, int24, int24));
-            
+
             who = sender; inRange = false;
-            (delta, ) = _modifyLiquidity(liquidity, 
+            (delta, ) = _modifyLiquidity(liquidity,
                             tickLower, tickUpper);
+            emit PrintDelta(delta.amount0(), delta.amount1());
         }
         else if (discriminant == Action.ModLP) { 
             (uint160 sqrtPriceX96, uint delta1, uint delta0,
@@ -547,17 +545,19 @@ contract MO is SafeCallback, Ownable {
         } 
         if (delta.amount0() > 0) { uint delta0 = uint(int(delta.amount0()));
             vanillaKey.currency0.take(poolManager, address(this), delta0, false);
-            require(stdMath.delta(delta0, GD.take(who, delta0, out)) <= 5, "$0");
+            require(stdMath.delta(delta0, quid.take(who, delta0 * 1e12, out)) <= 5);
             mockUSD.burn(delta0); if (inRange) POOLED_USD -= delta0;
         }
-        else if (delta.amount0() < 0) { 
+        else if (delta.amount0() < 0) {
             uint delta0 = uint(int(-delta.amount0())); mockUSD.mint(delta0); 
             vanillaKey.currency0.settle(poolManager, address(this), delta0, false);
             if (inRange) POOLED_USD += delta0;
         }
         if (delta.amount1() > 0) { uint delta1 = uint(int(delta.amount1()));
             vanillaKey.currency1.take(poolManager, address(this), delta1, false);
-            mockETH.burn(delta1); unRex(delta1); if (inRange) POOLED_ETH -= delta1;
+            mockETH.burn(delta1); CurrencyLibrary.ADDRESS_ZERO.transfer(who,
+                                                          unRex(delta1));
+            if (inRange) POOLED_ETH -= delta1;
         }
         else if (delta.amount1() < 0) { 
             uint delta1 = uint(int(-delta.amount1())); mockETH.mint(delta1); 
@@ -586,7 +586,7 @@ contract MO is SafeCallback, Ownable {
     // TODO address[] calldata whose 
     // include if 0for1 or both
     // if there is more liquidity
-    // managed by our router than 
+    // managed by our router than
     // the v3 pool, use range orders
     function unwind(bool zeroForOne,
         address who) isInitialised external {
@@ -613,7 +613,7 @@ contract MO is SafeCallback, Ownable {
                     if (delta <= -49) { // use all of the dollars we possibly can to buy the dip
                         buffer = FullMath.mulDiv(pledge.borrowed, uint(pledge.price), WAD * 1e12);
                         // recovered USDC we got from selling the borrowed ETH
-                        reUP = GD.take(address(this), buffer, address(USDC));
+                        reUP = quid.take(address(this), buffer, address(USDC));
 
                         require(stdMath.delta(reUP, buffer) <= 5,
                         "$buffer0for1"); buffer = reUP + pledge.supplied;
@@ -633,7 +633,7 @@ contract MO is SafeCallback, Ownable {
                             address(this), block.timestamp, buffer, reUP - reUP / 200));
 
                         reUP = buffer + pledge.supplied; pledge.supplied = 0;
-                        require(reUP == GD.deposit(address(this), address(USDC), reUP));
+                        require(reUP == quid.deposit(address(this), address(USDC), reUP));
                         pledge.buffer = reUP + FullMath.mulDiv(pledge.borrowed,
                                                 uint(pledge.price), WAD * 1e12);
                     }
@@ -642,8 +642,8 @@ contract MO is SafeCallback, Ownable {
                 }
                 // the following condition is our initial pivot
                 else if (delta <= -49 && pledge.buffer > 0) { // try to buy the dip
-                    buffer = GD.take(address(this), pledge.buffer, address(USDC));
-                    require(stdMath.delta(buffer, pledge.buffer) <= 5, "buffer0for1$");
+                    buffer = quid.take(address(this), pledge.buffer, address(USDC));
+                    require(stdMath.delta(buffer, pledge.buffer) <= 5);
 
                     reUP = FullMath.mulDiv(WAD, buffer * 1e12, uint(price));
                     buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
@@ -663,7 +663,7 @@ contract MO is SafeCallback, Ownable {
                     reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
                         abi.encodePacked(address(weth), uint24(500), address(USDC)),
                         address(this), block.timestamp, buffer, reUP - reUP / 200));
-                    require(reUP == GD.deposit(address(this), address(USDC), reUP));
+                    require(reUP == quid.deposit(address(this), address(USDC), reUP));
                     delete pledgesZeroForOne[who]; // we completed the cross-over 🏀
                     // TODO measure gain somehow?
                 } 
@@ -675,7 +675,7 @@ contract MO is SafeCallback, Ownable {
             if (delta <= -49 || delta >= 49) {
                 if (pledge.borrowed > 0) {
                     require(stdMath.delta(pledge.borrowed,
-                        GD.take(address(this), pledge.borrowed,
+                        quid.take(address(this), pledge.borrowed,
                         address(USDC))) <= 5, "unwind1for0$");
 
                     _unwind(address(USDC), address(weth),
@@ -687,7 +687,7 @@ contract MO is SafeCallback, Ownable {
                             abi.encodePacked(address(weth), uint24(500), address(USDC)),
                             address(this), block.timestamp, pledge.supplied, reUP - reUP / 200));
 
-                        require(pledge.supplied == GD.deposit(address(this),
+                        require(pledge.supplied == quid.deposit(address(this),
                                 address(USDC), pledge.supplied));
 
                         pledge.price = price;
@@ -701,9 +701,9 @@ contract MO is SafeCallback, Ownable {
                     pledgesOneForZero[who] = pledge;
                 }
                 // the following condition is our initial pivot
-                else if (delta <= -49 && pledge.supplied > 0) { // supplied in USDC
-                    require(stdMath.delta(pledge.supplied, GD.take(address(this),
-                        pledge.supplied, address(USDC))) <= 5, "$unwind1for0");
+                else if (delta <= -49 && pledge.supplied > 0) {
+                    require(stdMath.delta(pledge.supplied, quid.take(
+                    address(this), pledge.supplied, address(USDC))) <= 5);
                     reUP = FullMath.mulDiv(WAD, pledge.supplied * 1e12, uint(price));
                     pledge.buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
                         abi.encodePacked(address(USDC), uint24(500), address(weth)),
@@ -724,7 +724,7 @@ contract MO is SafeCallback, Ownable {
                     reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
                         abi.encodePacked(address(weth), uint24(500), address(USDC)),
                         address(this), block.timestamp, buffer, reUP - reUP / 200));
-                        require(reUP == GD.deposit(address(this), address(USDC), reUP));
+                        require(reUP == quid.deposit(address(this), address(USDC), reUP));
 
                     delete pledgesOneForZero[who];
                 }
@@ -817,10 +817,9 @@ contract MO is SafeCallback, Ownable {
         int24 tickLower, int24 tickUpper, uint128 myLiquidity) { 
         int24 currentTick; PoolId id = vanillaKey.toId();
         myLiquidity = poolManager.getLiquidity(id);
-        (sqrtPriceX96, 
+        (sqrtPriceX96,
         currentTick,,) = poolManager.getSlot0(id);
-        
-            tickUpper = UPPER_TICK;     tickLower = LOWER_TICK; 
+            tickUpper = UPPER_TICK;     tickLower = LOWER_TICK;
         if (currentTick > tickUpper || currentTick < tickLower) {
             if (myLiquidity > 0) { // remove, then add liquidity
                 poolManager.unlock(abi.encode(Action.Repack, 
