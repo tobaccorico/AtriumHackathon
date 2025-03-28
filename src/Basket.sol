@@ -54,7 +54,7 @@ contract Basket is
     struct Metrics {
         uint last; uint total; uint yield;
     }
-    struct Pod { uint credit; uint debit; }
+    struct Pod { uint shares; uint cash; }
     mapping(address => Pod) public perVault;
     mapping(address => bool) public isVault;
     mapping(address => bool) public isStable;
@@ -185,7 +185,7 @@ contract Basket is
             // ^ scale precision for USDC/USDT
             // because the rest are all 1e18
             vault = vaults[stables[i]];
-            shares = perVault[vault].debit;
+            shares = perVault[vault].shares;
             if (shares > 0) { 
                 shares = IERC4626(vault).convertToAssets(shares) * multiplier;
                 amounts[i + 1] = shares; amounts[0] += shares; // track total;
@@ -240,14 +240,12 @@ contract Basket is
     function withdraw(address to, address vault, uint amount) internal returns (uint sent) {
         uint sharesWithdrawn = Math.min(IERC4626(vault).balanceOf(address(this)),
                                         IERC4626(vault).convertToShares(amount));
-        console.log("sharesBalance", IERC4626(vault).balanceOf(address(this)));
-        console.log("amountConvertToShares", IERC4626(vault).convertToShares(amount));
+
         sent = IERC4626(vault).convertToAssets(sharesWithdrawn);
-        console.log("SENT", sent);
         require(sent == IERC4626(vault).redeem(sharesWithdrawn, to,
                                             address(this)), "take");
-        perVault[vault].credit -= sent;
-        perVault[vault].debit -= sharesWithdrawn;
+        perVault[vault].cash -= sent;
+        perVault[vault].shares -= sharesWithdrawn;
     }
 
     function deposit(address from,
@@ -264,7 +262,7 @@ contract Basket is
                                     address(this), amount);
             require(usd >= 50 * 
             (10 ** IERC20(IERC4626(token).asset()).decimals()) , "grant");
-            perVault[token].debit += amount; perVault[token].credit += usd;
+            perVault[token].shares += amount; perVault[token].cash += usd;
         }    
         else if (isStable[token] || token == SGHO) {
             usd = Math.min(amount, 
@@ -284,8 +282,8 @@ contract Basket is
                 IERC20(token).approve(vault, usd);
                 amount = IERC4626(vault).deposit(usd, 
                                     address(this));
-            } perVault[vault].debit += amount;
-              perVault[vault].credit += usd;
+            } perVault[vault].shares += amount;
+              perVault[vault].cash += usd;
         } else {
             require(false, "unsupported token");
         }
@@ -353,7 +351,7 @@ contract Basket is
         uint oldBalanceFrom = totalBalances[from];
         uint sent = _transferHelper(
         from, address(0), value);
-        // carry.debit will be untouched here...
+        // carry.shares will be untouched here...
         // return Router(V4).transferHelper(from,
         //     address(0), sent, oldBalanceFrom);
     }

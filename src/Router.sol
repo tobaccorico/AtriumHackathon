@@ -7,7 +7,7 @@ import {mockToken} from "./mockToken.sol";
 
 import {IPirexETH} from "./imports/IPirexETH.sol";
 import {IPool} from "aave-v3/interfaces/IPool.sol";
-import {WETH} from "solmate/src/tokens/WETH.sol";
+import {WETH as WETH9} from "solmate/src/tokens/WETH.sol";
 
 import {IUniswapV3Pool} from "./imports/V3/IUniswapV3Pool.sol";
 import {ISwapRouter} from "./imports/V3/ISwapRouter.sol"; // on L1 and Arbitrum
@@ -49,14 +49,15 @@ contract Router is SafeCallback, Ownable {
 
     uint internal _ETH_PRICE; // TODO remove
 
+    struct FeeSnapshot { uint eth; uint usd; }
     PoolKey vanillaKey; IUniswapV3Pool v3Pool;
     bool internal token1isWETH; // ^
     // for our v4 pool ETH is token1
     ISwapRouter v3Router; // fallback
     
-    IPirexETH rex; Basket quid;
+    IPirexETH REX; Basket QUID;
     IERC20 pxETH; IERC4626 rexVault;
-    IERC20 USDC; WETH weth; IPool aave;
+    IERC20 USDC; WETH9 WETH; IPool AAVE;
     mockToken mockETH; mockToken mockUSD;
     mapping(address => uint[]) positions;
     mapping(uint => SelfManaged) selfManaged;
@@ -97,12 +98,10 @@ contract Router is SafeCallback, Ownable {
     // out the yield over a week
 
     event PrintDelta(int,int);
-    event PrintOldTicks(int24,int24);
-    event PrintNewTicks(int24,int24);
 
-    // _unlockCallback    
-    enum Action { Swap, 
-        Repack, ModLP, 
+    // _unlockCallback
+    enum Action { Swap,
+        Repack, ModLP,
         OutsideRange
     } uint internal tokenId;
     // ^ always incrementing
@@ -116,7 +115,7 @@ contract Router is SafeCallback, Ownable {
                                   v3Router = ISwapRouter(_v3router);
             
             rexVault = IERC4626(_rexVault);
-            rex = IPirexETH(_piREX); 
+            REX = IPirexETH(_piREX);
             pxETH = IERC20(_pxETH); 
             
             address token0 = v3Pool.token0();
@@ -124,22 +123,22 @@ contract Router is SafeCallback, Ownable {
 
             if (IERC20(token1).decimals() > 
                 IERC20(token0).decimals()) {
-                weth = WETH(payable(token1));
+                WETH = WETH9(payable(token1));
                 USDC = IERC20(token0); 
                 token1isWETH = true; 
             } else {
                 token1isWETH = false;
-                weth = WETH(payable(token0));
+                WETH = WETH9(payable(token0));
                 USDC = IERC20(token1);
-            }   aave = IPool(_aave);
+            }   AAVE = IPool(_aave);
     }
 
     modifier isInitialised {
-        require(address(quid) != address(0), "init"); _;
+        require(address(QUID) != address(0), "init"); _;
     }
 
     modifier onlyQuid {
-        require(msg.sender == address(quid), "403"); _;
+        require(msg.sender == address(QUID), "403"); _;
     }
 
     // must send $1 USDC to address(this) & attach msg.value 1 wei
@@ -153,8 +152,8 @@ contract Router is SafeCallback, Ownable {
             mockETH = tokenTemporary; mockUSD = temporaryToken;
         }
         require(mockUSD.decimals() == 6, "1e6");
-        require(address(quid) == address(0), "quid");
-        quid = Basket(_quid); vanillaKey = PoolKey({
+        require(address(QUID) == address(0), "QUID");
+        QUID = Basket(_quid); vanillaKey = PoolKey({
             currency0: Currency.wrap(address(mockUSD)),
             currency1: Currency.wrap(address(mockETH)),
             fee: 420, tickSpacing: 10,
@@ -162,11 +161,11 @@ contract Router is SafeCallback, Ownable {
         }); renounceOwnership();    
 
         // GDR (a.k.a global depositary receipt)
-        require(quid.V4() == address(this), "!");
+        require(QUID.V4() == address(this), "!");
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
         poolManager.initialize(vanillaKey, sqrtPriceX96);
-        USDC.approve(address(quid), type(uint256).max);
-        // ^ just for calling quid.deposit in unwind()
+        USDC.approve(address(QUID), type(uint256).max);
+        // ^ just for calling QUID.deposit in unwind()
 
         mockUSD.approve(address(poolManager),
                         type(uint256).max);
@@ -174,21 +173,21 @@ contract Router is SafeCallback, Ownable {
                     type(uint256).max);
         mockETH.approve(address(poolManager),
                         type(uint256).max);
-        weth.approve(address(v3Router), 
+        WETH.approve(address(v3Router),
                     type(uint256).max);
         // ^ max approvals considered safe
         // to make as we fully control code
-        weth.approve(address(aave), 1 wei);
-        weth.deposit{ value: 1 wei }();
-        aave.supply(address(weth),
+        WETH.approve(address(AAVE), 1 wei);
+        WETH.deposit{ value: 1 wei }();
+        AAVE.supply(address(WETH),
              1 wei, address(this), 0);
-        aave.setUserUseReserveAsCollateral(
-                        address(weth), true);
+        AAVE.setUserUseReserveAsCollateral(
+                        address(WETH), true);
 
-        USDC.approve(address(aave), 1e6);
-        aave.supply(address(USDC),
+        USDC.approve(address(AAVE), 1e6);
+        AAVE.supply(address(USDC),
            1000000, address(this), 0);
-        aave.setUserUseReserveAsCollateral(
+        AAVE.setUserUseReserveAsCollateral(
                         address(USDC), true);
     }
 
@@ -205,23 +204,23 @@ contract Router is SafeCallback, Ownable {
                                          price, WAD);
         require(totalValue > 50 * WAD, "grant");
         totalValue /= 1e12; // 1e6 precision
-        uint took = quid.take(address(this),
+        uint took = QUID.take(address(this),
                 totalValue, address(USDC));
 
         require(stdMath.delta(totalValue, took) <= 5, "0for1$");
-        totalValue = took; USDC.approve(address(aave), totalValue);
+        totalValue = took; USDC.approve(address(AAVE), totalValue);
 
-        aave.supply(address(USDC), totalValue, address(this), 0);
-        aave.borrow(address(weth), borrowing, 2, 0, address(this));
+        AAVE.supply(address(USDC), totalValue, address(this), 0);
+        AAVE.borrow(address(WETH), borrowing, 2, 0, address(this));
 
         uint amount = FullMath.mulDiv(borrowing, price, 1e12 * WAD);
         amount = v3Router.exactInput(ISwapRouter.ExactInputParams(
-            abi.encodePacked(address(weth), uint24(500), address(USDC)),
+            abi.encodePacked(address(WETH), uint24(500), address(USDC)),
             address(this), block.timestamp, borrowing, amount - amount / 200));
-            require(amount == quid.deposit(address(this), address(USDC), amount));
+            require(amount == QUID.deposit(address(this), address(USDC), amount));
 
         uint withProfit = totalValue + totalValue / 30;
-        quid.mint(msg.sender, withProfit, address(quid), 0);
+        QUID.mint(msg.sender, withProfit, address(QUID), 0);
         pledgesZeroForOne[msg.sender] = viaAAVE({
             supplied: totalValue, borrowed: borrowing,
             buffer: buffer, price: int(price) });
@@ -232,24 +231,24 @@ contract Router is SafeCallback, Ownable {
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
         uint price = getPrice(sqrtPriceX96, true);
 
-        amount = quid.deposit(msg.sender, token, amount);
+        amount = QUID.deposit(msg.sender, token, amount);
         uint withProfit = amount + amount / 30;
 
         uint inETH = FullMath.mulDiv(WAD,
                 amount * 1e12, price);
 
         inETH = unRex(inETH);
-        weth.deposit{value: inETH}(); 
-        weth.approve(address(aave), inETH);
+        WETH.deposit{value: inETH}();
+        WETH.approve(address(AAVE), inETH);
 
-        aave.supply(address(weth), inETH, address(this), 0);
+        AAVE.supply(address(WETH), inETH, address(this), 0);
         amount = FullMath.mulDiv(inETH * 7 / 10, price, WAD * 1e12);
-        aave.borrow(address(USDC), amount, 2, 0, address(this));
+        AAVE.borrow(address(USDC), amount, 2, 0, address(this));
         
-        require(amount == quid.deposit(address(this),
+        require(amount == QUID.deposit(address(this),
                 address(USDC), amount));
 
-        quid.mint(msg.sender, withProfit, address(quid), 0);
+        QUID.mint(msg.sender, withProfit, address(QUID), 0);
         pledgesOneForZero[msg.sender] = viaAAVE({ 
             supplied: inETH, borrowed: amount,
             buffer: 0, price: int(price) });
@@ -278,7 +277,7 @@ contract Router is SafeCallback, Ownable {
                                     sqrtPriceX96, range);
         if (token == address(0)) {
             require(lowerTick > tickUpper, "right");
-            (amount, ) = rex.deposit{value: msg.value}
+            (amount, ) = REX.deposit{value: msg.value}
                             (address(this), true);
             liquidity = int(uint(
                 LiquidityAmounts.getLiquidityForAmount1(
@@ -286,7 +285,7 @@ contract Router is SafeCallback, Ownable {
                 )));
         } else {
             require(tickLower > upperTick, "left");
-            amount = quid.deposit(msg.sender,
+            amount = QUID.deposit(msg.sender,
                             token, amount);
             isStable = true;
             liquidity = int(uint(
@@ -303,15 +302,14 @@ contract Router is SafeCallback, Ownable {
         positions[msg.sender].push(next);
         tokenId = next;
 
-        BalanceDelta delta = abi.decode(
+        /*BalanceDelta delta =*/ abi.decode(
             poolManager.unlock(abi.encode(
                 Action.OutsideRange, msg.sender, liquidity,
                 tickLower, tickUpper)), (BalanceDelta));
                 uint ethBalance = address(this).balance;
     }
 
-    function reclaim(uint id, int percent) isInitialised
-        external returns (BalanceDelta delta) {
+    function reclaim(uint id, int percent) isInitialised external {
         SelfManaged memory position = selfManaged[id];
         require(position.owner == msg.sender, "403");
         require(percent > 0 && percent < 101, "%");
@@ -330,15 +328,33 @@ contract Router is SafeCallback, Ownable {
             require(position.liq > 0, "reclaim");
             selfManaged[id] = position;
         }
-        delta = abi.decode(poolManager.unlock(
+        /* delta = */ abi.decode(poolManager.unlock(
                 abi.encode(Action.OutsideRange,
                 msg.sender, -liquidity, position.lower,
                 position.upper)), (BalanceDelta));
+    }
 
+    function withdraw(uint amount) external {
+        (uint160 sqrtPriceX96,
+        int24 tickLower, int24 tickUpper,) = _repack();
+        autoManaged[msg.sender] -= amount;
+        uint pending = PENDING_ETH;
+        uint remains = amount;
+        if (pending > 0) {
+            uint pulling = Math.min(pending, amount);
+            PENDING_ETH = pending - pulling;
+            remains -= pulling; unRex(pulling);
+        }
+        if (remains > 0) {
+            require(mockETH.balanceOf(address(this)) > remains, "rm");
+            /* BalanceDelta delta = */ abi.decode(poolManager.unlock(
+                abi.encode(Action.ModLP, sqrtPriceX96, remains,
+                0, tickLower, tickUpper)), (BalanceDelta));
+        } // TODO P&L
     }
 
     function deposit() isInitialised external payable {
-        (uint amount, ) = rex.deposit{value: msg.value}(address(this), true);
+        (uint amount, ) = REX.deposit{value: msg.value}(address(this), true);
         autoManaged[msg.sender] = amount; _addLiquidity(POOLED_USD, amount);
     }
 
@@ -349,7 +365,7 @@ contract Router is SafeCallback, Ownable {
         uint price = getPrice(sqrtPriceX96, false);
         (delta0, delta1) = _addLiquidityHelper(delta0, delta1, price);
         if (delta0 > 0) { require(delta1 > 0, "_addLiquidity");
-            BalanceDelta delta = abi.decode(poolManager.unlock(
+            /* BalanceDelta delta = */ abi.decode(poolManager.unlock(
                 abi.encode(Action.ModLP, sqrtPriceX96, delta1, 
                 delta0, tickLower, tickUpper)), (BalanceDelta));
         }
@@ -357,7 +373,7 @@ contract Router is SafeCallback, Ownable {
 
     function _addLiquidityHelper(uint delta0, uint delta1, uint price) internal 
         returns (uint, uint) { uint pending = PENDING_ETH + delta1; // < queued
-        uint surplus = quid.get_total_deposits(true) - delta0;
+        uint surplus = QUID.get_total_deposits(true) - delta0;
         delta1 = Math.min(pending,
              FullMath.mulDiv(surplus * 1e12, WAD, price));
         if (delta1 > 0) { 
@@ -407,39 +423,39 @@ contract Router is SafeCallback, Ownable {
         isInitialised public payable returns (BalanceDelta) { 
         (uint160 sqrtPriceX96,,,) = _repack();
         uint price = getPrice(sqrtPriceX96, false);
-        bool isStable = quid.isStable(token);
+        bool isStable = QUID.isStable(token);
         // if this is true ^ user cares
         // about their output being all
-        // in 1 specific token, so they 
-        // won't get a balanced quantity
-        uint value; uint remains;
+        // in 1 specific token, so they
+        // won't get balanced quantity...
+        uint value; uint remains; uint got;
         if (!zeroForOne) { 
-            require(token == address(quid) || isStable, "$!");
+            require(token == address(QUID) || isStable, "$!");
             value = FullMath.mulDiv(msg.value, price, WAD); 
             require(value >= 50 * WAD, "grant");
-            if (value > POOLED_USD * 1e12) { 
+            if (value > POOLED_USD * 1e12) {
                 value = FullMath.mulDiv(WAD,
                     POOLED_USD * 1e12, price);
                 remains = msg.value - value;
 
-                weth.deposit{ value: remains }(); amount = value; // < max v4 can swap
+                WETH.deposit{ value: remains }(); amount = value; // < max v4 can swap
                 address receiver = token == address(USDC) ? msg.sender : address(this);
 
                 value = FullMath.mulDiv(remains, price, WAD * 1e12);
-                v3Router.exactInput(ISwapRouter.ExactInputParams(
-                    abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                    receiver, block.timestamp, remains, value - value / 200));
+                got = _getUSDC(remains, value - value / 200);
 
-                if (receiver == address(this)) {
+                if (token == address(USDC)) {
+                    USDC.transfer(msg.sender, got);
+                } else {
                     // TODO swap USDC for desired token, send to msg.sender
                 }
 
             } else {
                 amount = msg.value;
             }
-            (amount, ) = rex.deposit{value: amount}(address(this), true);
+            (amount, ) = REX.deposit{value: amount}(address(this), true);
         } else {
-            amount = quid.deposit(msg.sender, token, amount);
+            amount = QUID.deposit(msg.sender, token, amount);
             uint scale = 18 - IERC20(token).decimals();
             value = scale > 0 ? amount * 10 ** scale : amount;
             // value is in ETH, and amount is in dollars
@@ -450,15 +466,17 @@ contract Router is SafeCallback, Ownable {
 
                 remains = amount - value; amount = value;
                 value = FullMath.mulDiv(WAD, remains, price);
-                require(stdMath.delta(remains, quid.take(
+                require(stdMath.delta(remains, QUID.take(
                 address(this), remains, address(USDC))) <= 5);
 
-                weth.withdraw(v3Router.exactInput(ISwapRouter.ExactInputParams(
-                    abi.encodePacked(address(USDC), uint24(500), address(weth)),
-                    address(this), block.timestamp, remains, value - value / 200)));
+                got = v3Router.exactInput(ISwapRouter.ExactInputParams(
+                    abi.encodePacked(address(USDC), uint24(500), address(WETH)),
+                    address(this), block.timestamp, remains, value - value / 200));
+                    WETH.withdraw(got); CurrencyLibrary.ADDRESS_ZERO.transfer(
+                                                            msg.sender, got);
             }
         } if (amount > 0) {
-            BalanceDelta delta = abi.decode(
+            /* BalanceDelta delta = */ abi.decode(
                 poolManager.unlock(abi.encode(
                     Action.Swap, sqrtPriceX96,
                     msg.sender, zeroForOne, amount, 
@@ -466,7 +484,7 @@ contract Router is SafeCallback, Ownable {
         }
     }
 
-    function _unlockCallback(bytes calldata data) 
+    function _unlockCallback(bytes calldata data)
         internal override returns (bytes memory) {
         uint8 firstByte; BalanceDelta delta;
         address who = address(this); assembly {
@@ -474,7 +492,7 @@ contract Router is SafeCallback, Ownable {
             firstByte := and(word, 0xFF)
         }
         Action discriminant = Action(firstByte);
-        address out = address(quid);
+        address out = address(QUID);
         bool inRange = true;
         if (discriminant == Action.Swap) {
             (uint160 sqrtPriceX96, address sender, 
@@ -534,7 +552,6 @@ contract Router is SafeCallback, Ownable {
             who = sender; inRange = false;
             (delta, ) = _modifyLiquidity(liquidity,
                             tickLower, tickUpper);
-            emit PrintDelta(delta.amount0(), delta.amount1());
         }
         else if (discriminant == Action.ModLP) { 
             (uint160 sqrtPriceX96, uint delta1, uint delta0,
@@ -542,10 +559,10 @@ contract Router is SafeCallback, Ownable {
             data[32:], (uint160, uint, uint, int24, int24));  
             delta = _modLP(delta0, delta1, tickLower,
                             tickUpper, sqrtPriceX96);
-        } 
+        }
         if (delta.amount0() > 0) { uint delta0 = uint(int(delta.amount0()));
             vanillaKey.currency0.take(poolManager, address(this), delta0, false);
-            require(stdMath.delta(delta0, quid.take(who, delta0 * 1e12, out)) <= 5);
+            require(stdMath.delta(delta0, QUID.take(who, delta0 * 1e12, out)) <= 5);
             mockUSD.burn(delta0); if (inRange) POOLED_USD -= delta0;
         }
         else if (delta.amount0() < 0) {
@@ -559,31 +576,42 @@ contract Router is SafeCallback, Ownable {
                                                           unRex(delta1));
             if (inRange) POOLED_ETH -= delta1;
         }
-        else if (delta.amount1() < 0) { 
-            uint delta1 = uint(int(-delta.amount1())); mockETH.mint(delta1); 
+        else if (delta.amount1() < 0) {
+            uint delta1 = uint(int(-delta.amount1())); mockETH.mint(delta1);
             vanillaKey.currency1.settle(poolManager, address(this), delta1, false);
             if (inRange) POOLED_ETH += delta1;
         }
         return abi.encode(delta);
     }
 
+    function _getUSDC(uint howMuch, uint minExpected) internal returns (uint) {
+        return v3Router.exactInput(ISwapRouter.ExactInputParams(
+            abi.encodePacked(address(WETH), uint24(500), address(USDC)),
+            address(this), block.timestamp, howMuch, minExpected));
+    }
+
+    function _getWETH(uint howMuch, uint minExpected) internal returns (uint) {
+        return v3Router.exactInput(ISwapRouter.ExactInputParams(
+            abi.encodePacked(address(USDC), uint24(500), address(WETH)),
+            address(this), block.timestamp, howMuch, minExpected));
+    }
+
     fallback() external payable {} // redeem triggers this, but it's
     // fine to leave the implementation blank; swap() handles transfer
     function unRex(uint howMuch) internal returns (uint amount) {
-        uint fee = 2 * rex.fees(IPirexETH.Fees.InstantRedemption);
+        uint fee = 2 * REX.fees(IPirexETH.Fees.InstantRedemption);
         amount = Math.min(rexVault.balanceOf(address(this)),
                           rexVault.convertToShares(howMuch +
                           FullMath.mulDiv(howMuch, fee, 1e6)));
 
         amount = rexVault.redeem(amount, address(this), address(this));
-        (amount,) = rex.instantRedeemWithPxEth(amount, address(this));
-        if (amount > howMuch) {rex.deposit{value: amount - howMuch}
-                                            (address(this), true);
-            amount = howMuch;
-        }
+        (amount,) = REX.instantRedeemWithPxEth(amount, address(this));
+        if (amount > howMuch) { REX.deposit{value: amount - howMuch}
+                                             (address(this), true);
+                                               amount = howMuch; }
     }
 
-    // TODO address[] calldata whose 
+    // TODO address[] calldata whose
     // include if 0for1 or both
     // if there is more liquidity
     // managed by our router than
@@ -600,8 +628,8 @@ contract Router is SafeCallback, Ownable {
             if (delta <= -49 || delta >= 49) {
                 // supplied is in USDC...
                 if (pledge.borrowed > 0) {
-                    weth.deposit{ value: unRex(pledge.borrowed) }();
-                    _unwind(address(weth), address(USDC),
+                    WETH.deposit{ value: unRex(pledge.borrowed) }();
+                    _unwind(address(WETH), address(USDC),
                         pledge.borrowed, pledge.supplied);
                         // debt gets paid off regardless
 
@@ -613,60 +641,52 @@ contract Router is SafeCallback, Ownable {
                     if (delta <= -49) { // use all of the dollars we possibly can to buy the dip
                         buffer = FullMath.mulDiv(pledge.borrowed, uint(pledge.price), WAD * 1e12);
                         // recovered USDC we got from selling the borrowed ETH
-                        reUP = quid.take(address(this), buffer, address(USDC));
+                        reUP = QUID.take(address(this), buffer, address(USDC));
 
                         require(stdMath.delta(reUP, buffer) <= 5,
                         "$buffer0for1"); buffer = reUP + pledge.supplied;
                         reUP = FullMath.mulDiv(WAD, buffer * 1e12, uint(price));
-                        buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                            abi.encodePacked(address(USDC), uint24(500), address(weth)),
-                            address(this), block.timestamp, buffer, reUP - reUP / 200));
-                        weth.withdraw(buffer); // TODO PENDING_ETH ?
-                        (pledge.supplied, ) = rex.deposit{value: buffer}
+                        buffer = _getWETH(buffer, reUP - reUP / 200);
+                        WETH.withdraw(buffer); // TODO PENDING_ETH ?
+                        (pledge.supplied, ) = REX.deposit{value: buffer}
                                                 (address(this), true);
                         pledge.price = price; // < so we may know when to sell later
                     } else { // the buffer will be saved in USDC, used to pivot later
-                        buffer = unRex(pledge.buffer); weth.deposit{ value: buffer }();
+                        buffer = unRex(pledge.buffer); WETH.deposit{ value: buffer }();
                         reUP = FullMath.mulDiv(buffer, uint(price), WAD * 1e12);
-                        buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                            abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                            address(this), block.timestamp, buffer, reUP - reUP / 200));
-
-                        reUP = buffer + pledge.supplied; pledge.supplied = 0;
-                        require(reUP == quid.deposit(address(this), address(USDC), reUP));
+                        reUP = _getUSDC(buffer, reUP - reUP / 200) + pledge.supplied;
+                        require(reUP == QUID.deposit(address(this), address(USDC), reUP));
                         pledge.buffer = reUP + FullMath.mulDiv(pledge.borrowed,
                                                 uint(pledge.price), WAD * 1e12);
+                        pledge.supplied = 0;
                     }
                     pledge.borrowed = 0;
                     pledgesZeroForOne[who] = pledge;
                 }
                 // the following condition is our initial pivot
                 else if (delta <= -49 && pledge.buffer > 0) { // try to buy the dip
-                    buffer = quid.take(address(this), pledge.buffer, address(USDC));
+                    buffer = QUID.take(address(this), pledge.buffer, address(USDC));
                     require(stdMath.delta(buffer, pledge.buffer) <= 5);
 
                     reUP = FullMath.mulDiv(WAD, buffer * 1e12, uint(price));
-                    buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(USDC), uint24(500), address(weth)),
-                        address(this), block.timestamp, buffer, reUP - reUP / 200));
+                    buffer = _getWETH(buffer, reUP - reUP / 200);
 
-                    weth.withdraw(buffer);
-                    (pledge.supplied, ) = rex.deposit{value: buffer}
+                    WETH.withdraw(buffer);
+                    (pledge.supplied, ) = REX.deposit{value: buffer}
                                             (address(this), true);
 
                     pledge.price = price; // < so we know when to sell
                     pledgesZeroForOne[who] = pledge; // later for profit
                 }
                 else if (delta >= 49 && pledge.supplied > 0) { // supplied is ETH
-                    buffer = unRex(pledge.supplied); weth.deposit{ value: buffer }();
+                    buffer = unRex(pledge.supplied); WETH.deposit{ value: buffer }();
                     reUP = FullMath.mulDiv(buffer, uint(price), WAD * 1e12);
-                    reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                        address(this), block.timestamp, buffer, reUP - reUP / 200));
-                    require(reUP == quid.deposit(address(this), address(USDC), reUP));
+                    reUP = _getUSDC(buffer, reUP - reUP / 200);
+
+                    require(reUP == QUID.deposit(address(this), address(USDC), reUP));
                     delete pledgesZeroForOne[who]; // we completed the cross-over 🏀
                     // TODO measure gain somehow?
-                } 
+                }
             }
         } else {
             pledge = pledgesOneForZero[who];
@@ -675,44 +695,39 @@ contract Router is SafeCallback, Ownable {
             if (delta <= -49 || delta >= 49) {
                 if (pledge.borrowed > 0) {
                     require(stdMath.delta(pledge.borrowed,
-                        quid.take(address(this), pledge.borrowed,
+                        QUID.take(address(this), pledge.borrowed,
                         address(USDC))) <= 5, "unwind1for0$");
 
-                    _unwind(address(USDC), address(weth),
+                    _unwind(address(USDC), address(WETH),
                         pledge.borrowed, pledge.supplied);
 
                     if (delta >= 49) { // after this, supplied will be stored in USDC...
                         reUP = FullMath.mulDiv(pledge.supplied, uint(price), WAD * 1e12);
-                        pledge.supplied = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                            abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                            address(this), block.timestamp, pledge.supplied, reUP - reUP / 200));
+                        pledge.supplied = _getUSDC(pledge.supplied, reUP - reUP / 200);
 
-                        require(pledge.supplied == quid.deposit(address(this),
-                                address(USDC), pledge.supplied));
+                        require(pledge.supplied == QUID.deposit(address(this),
+                                 address(USDC), pledge.supplied));
 
                         pledge.price = price;
                     } else { // buffer is in ETH
-                        weth.withdraw(pledge.supplied);
-                        (pledge.buffer,) = rex.deposit{value: buffer}
+                        WETH.withdraw(pledge.supplied);
+                        (pledge.buffer,) = REX.deposit{value: buffer}
                                             (address(this), true);
                         pledge.supplied = 0;
-                    }
-                    pledge.borrowed = 0;
-                    pledgesOneForZero[who] = pledge;
+                    }   pledge.borrowed = 0;
+                        pledgesOneForZero[who] = pledge;
                 }
                 // the following condition is our initial pivot
                 else if (delta <= -49 && pledge.supplied > 0) {
-                    require(stdMath.delta(pledge.supplied, quid.take(
+                    require(stdMath.delta(pledge.supplied, QUID.take(
                     address(this), pledge.supplied, address(USDC))) <= 5);
                     reUP = FullMath.mulDiv(WAD, pledge.supplied * 1e12, uint(price));
-                    pledge.buffer = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(USDC), uint24(500), address(weth)),
-                        address(this), block.timestamp, pledge.supplied, reUP - reUP / 200));
+                    pledge.buffer = _getWETH(pledge.supplied, reUP - reUP / 200);
 
                     pledge.supplied = 0;
                     pledge.price = price;
-                    weth.withdraw(pledge.buffer);
-                    rex.deposit{value: pledge.buffer}
+                    WETH.withdraw(pledge.buffer);
+                    REX.deposit{value: pledge.buffer}
                                 (address(this), true);
                     pledgesOneForZero[who] = pledge;
                 }
@@ -721,11 +736,9 @@ contract Router is SafeCallback, Ownable {
                     reUP = FullMath.mulDiv(uint(price),
                                     buffer, 1e12 * WAD);
 
-                    reUP = v3Router.exactInput(ISwapRouter.ExactInputParams(
-                        abi.encodePacked(address(weth), uint24(500), address(USDC)),
-                        address(this), block.timestamp, buffer, reUP - reUP / 200));
-                        require(reUP == quid.deposit(address(this), address(USDC), reUP));
-
+                    reUP = _getUSDC(buffer, reUP - reUP / 200);
+                    require(reUP == QUID.deposit(address(this),
+                             address(USDC), reUP));
                     delete pledgesOneForZero[who];
                 }
             }
@@ -734,32 +747,9 @@ contract Router is SafeCallback, Ownable {
 
     function _unwind(address repay, address out,
         uint borrowed, uint supplied) internal {
-        IERC20(repay).approve(address(aave), borrowed);
-        aave.repay(repay, borrowed, 2, address(this));  
-        aave.withdraw(out, supplied, address(this));
-    }
-
-    function withdraw(uint amount) external { 
-        (uint160 sqrtPriceX96, 
-        int24 tickLower, int24 tickUpper,) = _repack(); 
-        autoManaged[msg.sender] -= amount;
-        uint pending = PENDING_ETH; 
-        uint remains = amount;
-        if (pending > 0) { 
-            uint pulling = Math.min(pending, amount); 
-            PENDING_ETH = pending - pulling;
-            remains -= pulling; unRex(pulling); 
-        }
-        if (remains > 0) {
-            require(mockETH.balanceOf(address(this)) > remains, "rm");
-            BalanceDelta delta = abi.decode(poolManager.unlock(
-                abi.encode(Action.ModLP, sqrtPriceX96, remains, 
-                0, tickLower, tickUpper)), (BalanceDelta));
-            uint ethBalance = address(this).balance;
-            if (ethBalance > 0) { 
-                CurrencyLibrary.ADDRESS_ZERO.transfer(
-                               msg.sender, ethBalance); }
-        } // TODO P&L
+        IERC20(repay).approve(address(AAVE), borrowed);
+        AAVE.repay(repay, borrowed, 2, address(this));
+        AAVE.withdraw(out, supplied, address(this));
     }
 
     function _modifyLiquidity(int delta, // liquidity delta
@@ -822,7 +812,7 @@ contract Router is SafeCallback, Ownable {
             tickUpper = UPPER_TICK;     tickLower = LOWER_TICK;
         if (currentTick > tickUpper || currentTick < tickLower) {
             if (myLiquidity > 0) { // remove, then add liquidity
-                poolManager.unlock(abi.encode(Action.Repack, 
+                poolManager.unlock(abi.encode(Action.Repack,
                                   myLiquidity, sqrtPriceX96, 
                                     tickLower, tickUpper));
             } else {
