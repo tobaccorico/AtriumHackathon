@@ -146,6 +146,14 @@ contract Router is SafeCallback, Ownable {
         require(msg.sender == address(QUID), "403"); _;
     }
 
+    function collect() onlyOwner external {
+        uint remains = rexVault.maxWithdraw(
+            address(this)) - mockETH.balanceOf(address(this));
+        if (remains > 0) {
+            rexVault.withdraw(remains, owner(), address(this));
+        }
+    }
+
     // must send $1 USDC to address(this) & attach msg.value 1 wei
     function setQuid(address _quid) external payable onlyOwner {
         // these virtual balances represent assets inside the curve
@@ -163,8 +171,7 @@ contract Router is SafeCallback, Ownable {
             currency1: Currency.wrap(address(mockETH)),
             fee: 420, tickSpacing: 10,
             hooks: IHooks(address(0))
-        }); renounceOwnership();    
-
+        });
         require(QUID.V4() == address(this), "!");
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
         poolManager.initialize(vanillaKey, sqrtPriceX96);
@@ -343,15 +350,15 @@ contract Router is SafeCallback, Ownable {
             (BalanceDelta));
     }
 
-    function redeem(uint amount, address token) external {
+    function redeem(uint amount) external {
         require(amount >= WAD, "will round down to nothing");
         amount = QUID.turn(msg.sender, amount);
-        uint total = QUID.get_total_deposits(true);
-        if (amount > 0) {
+        (uint total, ) = QUID.get_metrics(false);
+        if (amount > 0) { 
             uint gains = FullMath.mulDiv(LEVER_YIELD,
                                         amount, total);
             LEVER_YIELD -= gains; amount += gains;
-            QUID.take(msg.sender, amount, token);
+            QUID.take(msg.sender, amount, address(QUID));
         }
     }
 
@@ -416,11 +423,12 @@ contract Router is SafeCallback, Ownable {
 
     function _addLiquidityHelper(uint delta0, uint delta1, uint price) internal 
         returns (uint, uint) { uint pending = PENDING_ETH + delta1; // < queued
-        uint surplus = QUID.get_total_deposits(true) / 1e12 - delta0;
+        (uint total, ) = QUID.get_metrics(false);
+        uint surplus = (total / 1e12) - delta0;
         delta1 = Math.min(pending,
             FullMath.mulDiv(surplus *
             1e12, WAD, price));
-        if (delta1 > 0) { 
+        if (delta1 > 0) {
             delta0 = FullMath.mulDiv(delta1,
                      price, WAD * 1e12);
                       pending -= delta1;
@@ -819,7 +827,7 @@ contract Router is SafeCallback, Ownable {
             TickMath.getSqrtPriceAtTick(tickLower), sqrtPriceX96, delta);
     }
 
-    function _alignTick(int24 tick) 
+    function _alignTick(int24 tick)
         internal pure returns (int24) {
         if (tick < 0 && tick % 10 != 0) {
             return ((tick - 10 + 1) / 10) * 10;

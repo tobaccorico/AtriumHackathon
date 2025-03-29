@@ -66,7 +66,7 @@ contract RouterTest is Test, Fixtures {
     address[] public VAULTS;
     IERC4626 public gauntletUSDCvault = IERC4626(0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458);
     IERC4626 public steakhouseUSDTvault = IERC4626(0xbEef047a543E45807105E51A8BBEFCc5950fcfBa);
-    
+
     // unlike other vaults, SGHO has special interface (similar to ERC4626)
     IERC20 public SGHO = IERC20(0x1a88Df1cFe15Af22B3c4c783D4e6F7F9e0C1885d);
     IERC4626 public SDAI = IERC4626(0x83F20F44975D03b1b09e64809B757c47f942BEeA);
@@ -208,10 +208,9 @@ contract RouterTest is Test, Fixtures {
         // will not correspond to pool price
         // V4router.unwindZeroForOne(whose);
 
-        USDC.approve(address(QUID), stack/10);
-        V4router.leverOneForZero(stack/10,
+        USDC.approve(address(QUID), stack / 10);
+        V4router.leverOneForZero(stack / 10,
                             address(USDC));
-
         vm.stopPrank();
     }
 
@@ -222,16 +221,16 @@ contract RouterTest is Test, Fixtures {
         uint USDCbalanceBefore = USDC.balanceOf(User01);
        // amount hasn't matured yet,
         // minimum 1 month maturity
-        V4router.redeem(1000 * WAD, address(QUID));
+        V4router.redeem(1000 * WAD);
         uint USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter,
                         USDCbalanceBefore, 1);
         vm.warp(vm.getBlockTimestamp() + 30 days);
-        V4router.redeem(1000 * WAD, address(QUID));
+        V4router.redeem(1000 * WAD);
 
         USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter -
-            USDCbalanceBefore, stack/10, 1);
+            USDCbalanceBefore, stack / 10, 1);
 
         vm.stopPrank();
     }

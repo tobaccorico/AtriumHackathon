@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+
+import {Router} from  "./Router.sol";
+
 import "lib/forge-std/src/console.sol";
 // TODO delete logging before mainnet...
 
@@ -13,7 +16,6 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IERC4626} from "forge-std/interfaces/IERC4626.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
-import {ReentrancyGuard} from "solmate/src/utils/ReentrancyGuard.sol";
 
 interface IStakeToken is IERC20 { // StkGHO (safety module)
     function stake(address to, uint256 amount) external;
@@ -27,23 +29,14 @@ interface IStakeToken is IERC20 { // StkGHO (safety module)
              external view returns (uint256);
 }
 
-interface ICurvePool {
-    function add_liquidity(uint256[2] calldata amounts, uint256 deadline) external;
-    function remove_liquidity(uint256 _amount, uint256 deadline, uint256[2] calldata min_amounts) external;
-
-}
-
-import {Router} from  "./Router.sol"; 
-contract Basket is
-    ReentrancyGuard, ERC6909 { 
+contract Basket is ERC6909 {
     using SafeTransferLib for IERC20;
     using SafeTransferLib for IERC4626;
     using SortedSetLib for SortedSetLib.Set;
 
     uint constant WAD = 1e18;
     address[] public stables;
-    
-    address _deployer; 
+
     uint private _deployed;
     uint private _totalSupply;
     Metrics private coreMetrics;
@@ -135,7 +128,7 @@ contract Basket is
     constructor(address _router,
         address[] memory _stables, 
         address[] memory _vaults) { 
-        _deployed = block.timestamp; _deployer = msg.sender;
+        _deployed = block.timestamp;
         require(_stables.length == _vaults.length, "align"); 
         address stable; address vault; stables = _stables;
         for (uint i = 0; i < _vaults.length; i++) {
@@ -145,27 +138,29 @@ contract Basket is
         }   V4 = payable(_router);
     }
     
-    function get_total_deposits(bool force) 
-        public returns (uint) { Metrics memory stats = coreMetrics;
+    function get_metrics(bool force)
+        public returns (uint, uint) {
+        Metrics memory stats = coreMetrics;
         if (force || block.timestamp - stats.last > 10 minutes) {
             // give credit to this calculation often, lest stale
             uint[10] memory amounts = get_deposits();
             stats.last = block.timestamp;
             stats.total = amounts[0];
-            stats.yield = FullMath.mulDiv(10000, 
-               amounts[9], amounts[0] - amounts[8]) - 10000;
-            coreMetrics = stats; // exclude sGHO "yield" as this
-        }   return stats.total; // goes to the contract deployer
+            stats.yield = FullMath.mulDiv(WAD,
+               amounts[9], amounts[0] - amounts[8]) - WAD;
+            coreMetrics = stats; // exclude ^ sGHO "yield" as it goes
+        } return (stats.total, stats.yield); // to the Router's owner
     }
 
-    function claim() external {
+    function collect() external {
         address vault = vaults[
-            stables[stables.length-1]];
+        stables[stables.length-1]];
         IStakeToken(vault).claimRewards(
-            _deployer, type(uint256).max);
+                    Router(V4).owner(),
+                    type(uint256).max);
     }
 
-    function get_deposits() public 
+    function get_deposits() public view
         returns (uint[10] memory amounts) {
         address vault; uint shares; // 4626
         uint ghoIndex = stables.length - 1;
@@ -175,10 +170,10 @@ contract Basket is
             // because the rest are all 1e18
             vault = vaults[stables[i]];
             shares = perVault[vault].shares;
-            if (shares > 0) { 
+            if (shares > 0) {
                 shares = IERC4626(vault).convertToAssets(shares) * multiplier;
                 amounts[i + 1] = shares; amounts[0] += shares; // track total;
-                amounts[9] += FullMath.mulDiv(shares, // < weighted sum of 
+                amounts[9] += FullMath.mulDiv(shares, // < weighted sum of
                     IERC4626(vault).totalAssets() * multiplier, // APY 
                     IERC4626(vault).totalSupply()); // for staking...
             }
@@ -244,7 +239,7 @@ contract Basket is
     function deposit(address from,
         address token, uint amount)
         public returns (uint usd) {
-        address GHO = stables[stables.length - 1]; 
+        address GHO = stables[stables.length - 1];
         address SGHO = vaults[GHO]; address vault;
         if (isVault[token] && token != SGHO) { 
             amount = Math.min(
@@ -254,7 +249,7 @@ contract Basket is
                    IERC4626(token).transferFrom(msg.sender,
                                     address(this), amount);
             require(usd >= 50 * 
-            (10 ** IERC20(IERC4626(token).asset()).decimals()) , "grant");
+            (10 ** IERC20(IERC4626(token).asset()).decimals()), "grant");
             perVault[token].shares += amount; perVault[token].cash += usd;
         }    
         else if (isStable[token] || token == SGHO) {
@@ -299,38 +294,38 @@ contract Basket is
     }
 
     /**
-     * @dev the cost of minting depends on
-     * how much risk is encumbered in Router,
-     * as well as total demand to mint,
-     * and, finally, bonding duration
      * @param pledge is on whose behalf...
      * @param amount is the amount to mint
      * @param token is what will be bonded
      * @param when is when amount matures
      */
     function mint(address pledge, uint amount, 
-        address token, uint when) public 
-        nonReentrant { uint month = Math.max(when,
-                            currentMonth() + 1);
+        address token, uint when) public {
+        uint month = Math.max(when,
+            currentMonth() + 1);
         if (token == address(this)) {
             require(msg.sender == V4, "403");
             _mint(pledge, month, amount);
-        }
-        else { _mint(pledge, month, amount);
+        } else {
             uint scale = 18 - IERC20(token).decimals();
-            amount /= scale > 0 ? 10 ** scale : 1;
-            uint paid = deposit(pledge, token, amount);
+            uint depositing = scale > 0 ?
+            amount / (10 ** scale) : amount;
+            uint paid = deposit(pledge, token, depositing);
+            (uint total, uint yield) = get_metrics(false);
+            amount += FullMath.mulDiv(amount * yield,
+                month - currentMonth(), WAD * 12);
+            _mint(pledge, month, amount);
         }
     }
 
     function transferFrom(address from, 
-        address to, uint amount) public 
+        address to, uint amount) public
         returns (bool) {
         if (msg.sender != from
             && !isOperator[from][msg.sender]) {
             if (to == V4) {
                 require(msg.sender == V4, "403");
-            }    
+            }
             uint256 allowed = _allowances[from][msg.sender];
             if (allowed != type(uint256).max) {
                 _allowances[from][msg.sender] = allowed - amount;

@@ -37,7 +37,7 @@ providing an incentivised mechanism for
 slowly shifting liquidity from UniV3 to V4,  
 the strategy reminds us of Allen Iverson’s  
 signature basketball move: the cross-over,  
-supported our bond-like **6909 extension**...  
+supported ин our bond-like **6909 extension**  
 
 Levered swap fees go to stablecoin depositors,  
 while regular swap fees go to ETH depositors...  
