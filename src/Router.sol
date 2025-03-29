@@ -647,13 +647,14 @@ contract Router is SafeCallback, Ownable {
                                                amount = howMuch; }
     }
 
-    function unwind(bool zeroForOne,
-        address who) isInitialised external {
+    function unwindZeroForOne(address[] calldata whose) external {
         viaAAVE memory pledge; uint buffer; uint reUP;
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
         int price = int(getPrice(sqrtPriceX96, true));
         // we always take profits (fully exit) in USDC
-        if (zeroForOne) { pledge = pledgesZeroForOne[who];
+        for (uint i = 0; i < whose.length; i++) {
+            address who = whose[i];
+            pledge = pledgesZeroForOne[who];
             int delta = (price - pledge.price)
                         * 1000 / pledge.price;
             if (delta <= -49 || delta >= 49) {
@@ -718,7 +719,17 @@ contract Router is SafeCallback, Ownable {
                     LEVER_YIELD += (reUP - pledge.breakeven / 1e12) * 1e12;
                 }
             }
-        } else { pledge = pledgesOneForZero[who];
+        }
+    }
+
+    function unwindOneForZero(address[] calldata whose) external {
+        viaAAVE memory pledge; uint buffer; uint reUP;
+        (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
+        int price = int(getPrice(sqrtPriceX96, true));
+        // we always take profits (fully exit) in USDC
+        for (uint i = 0; i < whose.length; i++) {
+            address who = whose[i];
+            pledge = pledgesOneForZero[who];
             int delta = (price - pledge.price)
                         * 1000 / pledge.price;
             if (delta <= -49 || delta >= 49) {
@@ -735,13 +746,13 @@ contract Router is SafeCallback, Ownable {
                         pledge.supplied = _getUSDC(pledge.supplied, reUP - reUP / 200);
 
                         require(pledge.supplied == QUID.deposit(address(this),
-                                 address(USDC), pledge.supplied));
+                                    address(USDC), pledge.supplied));
 
                         pledge.price = price;
                     } else { // buffer is in ETH
                         WETH.withdraw(pledge.supplied);
                         (pledge.buffer,) = REX.deposit{value: buffer}
-                                             (address(this), true);
+                                                (address(this), true);
                         pledge.supplied = 0;
                     }   pledge.borrowed = 0;
                         pledgesOneForZero[who] = pledge;
@@ -767,7 +778,7 @@ contract Router is SafeCallback, Ownable {
 
                     reUP = _getUSDC(buffer, reUP - reUP / 200);
                     require(reUP == QUID.deposit(address(this),
-                             address(USDC), reUP));
+                                address(USDC), reUP));
 
                     LEVER_YIELD += (reUP - pledge.breakeven / 1e12) * 1e12;
                     delete pledgesOneForZero[who];
@@ -829,7 +840,7 @@ contract Router is SafeCallback, Ownable {
         bool up, uint delta) internal pure returns (uint160) { 
         uint x = up ? FixedPointMathLib.sqrt(1e18 + delta * 1e14):
                       FixedPointMathLib.sqrt(1e18 - delta * 1e14);
-        return uint160(FixedPointMathLib.mulDivDown(x, uint(sqrtPriceX96), 
+        return uint160(FixedPointMathLib.mulDivDown(x, uint(sqrtPriceX96),
                        FixedPointMathLib.sqrt(1e18)));
     }
 

@@ -190,6 +190,9 @@ contract RouterTest is Test, Fixtures {
         QUID.mint(User01, 50000 * WAD, address(USDC), 0);
         V4router.deposit{value: 25 ether}();
 
+        address[] memory whose = new address[](1);
+        whose[0] = User01;
+
         // uint price = V4router.getPrice(0, false);
         // uint expectingToBuy = price * 1 ether;
         // expectingToBuy += expectingToBuy / 25;
@@ -203,7 +206,7 @@ contract RouterTest is Test, Fixtures {
         // WE will get "Too little received"
         // because the simulated price spike
         // will not correspond to pool price
-        // V4router.unwind(true, User01);
+        // V4router.unwindZeroForOne(whose);
 
         USDC.approve(address(QUID), stack/10);
         V4router.leverOneForZero(stack/10,

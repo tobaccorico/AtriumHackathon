@@ -394,47 +394,19 @@ contract Basket is
     }
 
     /**
-     * @dev A transfer which doesn't specifying the
+     * @dev A transfer that doesn't specify which
      * batch will proceed backwards from most recent
      * to oldest batch until the transfer amount is 
-     * fulfilled entirely. Tokenholders that desire 
+     * fulfilled entirely. Tokenholders that desire
      * a more granular result should use the other
      * transfer function (we do not override 6909)
      */
     function _transfer(address from, address to,
         uint amount) internal returns (bool) {
-        // uint senderVote = feeVotes[from]; // TODO
-        // ^ this variable allows us to only
-        // read from storage once to save gas
         uint oldBalanceFrom = totalBalances[from];
         uint oldBalanceTo = totalBalances[to];
         uint value = _transferHelper(
                 from, to, amount);
-        
-        uint sent = 0;
-        // uint sent = Router(V4).transferHelper(
-        //      from, to, value, oldBalanceFrom);
-        
-        if (value != sent) { // this is only for
-        // the situation where to == address(V4): 
-        // burning debt, and in the case where we 
-        // tried to burn more than was available
-            value -= sent; // value is now excess
-            // which is the amount we can't burn;
-            // _transfeHelper displaced the entire 
-            // value from various maturities, to 
-            // undo this perfectly would be too much
-            // work, so we just mint delta as current
-            _mint(from, currentMonth() + 2, value);
-            value = sent; // mint increases supply
-        } 
-        // _calculateMedian(oldBalanceFrom, senderVote, 
-        //          oldBalanceFrom - value, senderVote);
-        // rebalace the median with updated stake...
-        if (to != address(0)) {
-            // uint receiverVote = feeVotes[to];
-            // _calculateMedian(oldBalanceTo, receiverVote,
-            //          oldBalanceTo + value, receiverVote);
-        } return true; // TODO delegation of voting power...
+       return true;
     }
 }
