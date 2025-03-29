@@ -151,12 +151,12 @@ contract Basket is
             // give credit to this calculation often, lest stale
             uint[10] memory amounts = get_deposits();
             stats.last = block.timestamp;
-            stats.total = amounts[0] / 1e12;
+            stats.total = amounts[0];
             stats.yield = FullMath.mulDiv(10000, 
                amounts[9], amounts[0] - amounts[8]) - 10000;
             coreMetrics = stats; // exclude sGHO "yield" as this
         }   return stats.total; // goes to the contract deployer
-    } 
+    }
 
     function claim() external {
         address vault = vaults[
@@ -182,44 +182,51 @@ contract Basket is
                     IERC4626(vault).totalAssets() * multiplier, // APY 
                     IERC4626(vault).totalSupply()); // for staking...
             }
-        } vault = vaults[stables[ghoIndex]]; 
-        
+        } vault = vaults[stables[ghoIndex]];
         shares = IStakeToken(vault).previewRedeem(
                  IStakeToken(vault).balanceOf(
-                                address(this))); 
-
-        amounts[stables.length] = shares; 
+                                address(this)));
+        amounts[stables.length] = shares;
         amounts[0] += shares; // our total
     }
 
-    function take(address who, // on whose behalf $ exiting the basket
-        uint amount, address token) public onlyUs returns (uint sent) {
-        if (token == address(this)) { // evenly distributed disbursement
-            uint[10] memory amounts = get_deposits();
-            uint total = amounts[0]; address vault;
-            uint ghoIndex = stables.length;
-            for (uint i = 1; i < ghoIndex; i++) {
-                uint divisor = (i - 1) > 1 ? 1 : 1e12;
-                amounts[i] = FullMath.mulDiv(amount, FullMath.mulDiv(
-                                        WAD, amounts[i], total), WAD);
-                amounts[i] /= divisor;
-                if (amounts[i] > 0) { vault = vaults[stables[i - 1]];
-                    amounts[i] = withdraw(who, vault, amounts[i]);
-                    sent += amounts[i] * divisor;
-                } 
-            } vault = vaults[stables[stables.length - 1]];
-            
-            amounts[ghoIndex] = FullMath.mulDiv(amount, FullMath.mulDiv(
-                                    WAD, amounts[ghoIndex], total), WAD);
-            
-            if (amounts[ghoIndex] > 0) { 
-                // exchange rate is 1:1, but just to be safe we calculate
-                amount = IStakeToken(vault).previewStake(amounts[ghoIndex]);
-                require(IStakeToken(vault).previewRedeem(amount) == amounts[ghoIndex], "sgho");
-                IStakeToken(vault).redeem(who, amount); sent += amounts[ghoIndex];
+    function take(address who, // on whose behalf
+        uint amount, address token) public onlyUs
+        returns (uint sent) { address vault;
+        if (token != address(this)) {
+            vault = vaults[token];
+            if (perVault[vault].cash >= amount) {
+                return withdraw(who, vault, amount);
+            } else {
+                amount -= withdraw(who, vault,
+                        perVault[vault].cash);
+
+                uint scale = 18 - IERC20(token).decimals();
+                amount *= scale > 0 ? 10 ** scale : 1;
             }
-        } else { // TODO swap through Curve if we don't have enough of the token we need?
-            return withdraw(who, vaults[token], amount);
+        }
+        uint[10] memory amounts = get_deposits();
+        uint total = amounts[0];
+        uint ghoIndex = stables.length;
+        for (uint i = 1; i < ghoIndex; i++) {
+            uint divisor = (i - 1) > 1 ? 1 : 1e12;
+            amounts[i] = FullMath.mulDiv(amount, FullMath.mulDiv(
+                                    WAD, amounts[i], total), WAD);
+            amounts[i] /= divisor;
+            if (amounts[i] > 0) { vault = vaults[stables[i - 1]];
+                amounts[i] = withdraw(who, vault, amounts[i]);
+                sent += amounts[i] * divisor;
+            }
+        } vault = vaults[stables[stables.length - 1]];
+
+        amounts[ghoIndex] = FullMath.mulDiv(amount, FullMath.mulDiv(
+                                WAD, amounts[ghoIndex], total), WAD);
+
+        if (amounts[ghoIndex] > 0) {
+            // exchange rate is 1:1, but just to be safe we calculate
+            amount = IStakeToken(vault).previewStake(amounts[ghoIndex]);
+            require(IStakeToken(vault).previewRedeem(amount) == amounts[ghoIndex], "sgho");
+            IStakeToken(vault).redeem(who, amount); sent += amounts[ghoIndex];
         }
     }
 
@@ -313,7 +320,6 @@ contract Basket is
             uint scale = 18 - IERC20(token).decimals();
             amount /= scale > 0 ? 10 ** scale : 1;
             uint paid = deposit(pledge, token, amount);
-            // Router(V4).mint(pledge, cost, amount);
         }
     }
 
@@ -338,9 +344,6 @@ contract Basket is
         uint oldBalanceFrom = totalBalances[from];
         sent = _transferHelper(from,
                 address(0), value);
-        // carry.shares will be untouched here...
-        // return Router(V4).transferHelper(from,
-        //     address(0), sent, oldBalanceFrom);
     }
 
     // eventually a balance may be spread
@@ -430,7 +433,7 @@ contract Basket is
         // rebalace the median with updated stake...
         if (to != address(0)) {
             // uint receiverVote = feeVotes[to];
-            // _calculateMedian(oldBalanceTo, receiverVote, 
+            // _calculateMedian(oldBalanceTo, receiverVote,
             //          oldBalanceTo + value, receiverVote);
         } return true; // TODO delegation of voting power...
     }
