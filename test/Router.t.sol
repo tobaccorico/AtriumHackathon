@@ -77,8 +77,7 @@ contract RouterTest is Test, Fixtures {
 
     address[] public CURVES;
 
-
-    Basket public quid; Router public V4router;
+    Basket public QUID; Router public V4router;
     uint stack = 10000 * USDC_PRECISION;
     function setUp() public {
         STABLECOINS = [
@@ -108,7 +107,7 @@ contract RouterTest is Test, Fixtures {
         address(V3router),
         pirexETH, address(pxETH), 
         rexVault, aavePool); 
-        quid = new Basket(
+        QUID = new Basket(
             address(V4router), 
             STABLECOINS, VAULTS
         );
@@ -118,7 +117,7 @@ contract RouterTest is Test, Fixtures {
         vm.stopPrank();
         // the following transfer is necessary for setQuid()
         USDC.transfer(address(V4router), 1 * USDC_PRECISION);
-        V4router.setQuid{value: 1 wei}(address(quid));
+        V4router.setQuid{value: 1 wei}(address(QUID));
     }
 
 
@@ -127,15 +126,15 @@ contract RouterTest is Test, Fixtures {
         uint ETHfee = 6 * 1e15; // incl Dinero fee + ^^^^^ 
         
         vm.startPrank(User01);
-        USDC.approve(address(quid), 5 * stack);
-        quid.mint(User01, 5 * stack, address(USDC), 0);
+        USDC.approve(address(QUID), 5 * stack);
+        QUID.mint(User01, 50000 * WAD, address(USDC), 0);
 
         V4router.deposit{value: 25 ether}(); // ADD LIQUIDITY TO POOL
 
         uint balanceBefore =  User01.balance; //USDC.balanceOf(User01);
         uint id = V4router.outOfRange{value: 1 ether}(0, // TEST OUT OF RANGE
                                   address(0), 400, 100);
-        // USDC.approve(address(quid), stack / 10);
+        // USDC.approve(address(QUID), stack / 10);
         /* uint id = V4router.outOfRange(stack / 10,
                         address(USDC), -4000, 100); */ // it works!
         uint balanceAfter = User01.balance; // USDC.balanceOf(User01);
@@ -160,8 +159,8 @@ contract RouterTest is Test, Fixtures {
         price = V4router.getPrice(0, false);
         balanceBefore = User01.balance;
         // note, we're not approving the router!
-        USDC.approve(address(quid), price / 1e12); 
-        // but Basket, because quid does transferFrom
+        USDC.approve(address(QUID), price / 1e12); 
+        // but Basket, because QUID does transferFrom
 
         V4router.swap(address(USDC), true, price / 1e12);
 
@@ -176,8 +175,8 @@ contract RouterTest is Test, Fixtures {
 
         USDCbalanceAfter = USDC.balanceOf(User01);
 
-        assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore, 
-                            expectingToBuy, USDCfee * 133); 
+        assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore,
+                            expectingToBuy, USDCfee * 133);
         
         // TODO remove ETH
         vm.stopPrank();
@@ -185,10 +184,10 @@ contract RouterTest is Test, Fixtures {
 
     // testing ability is limited because we can't
     // simulate a price drop inside the Univ3 pool
-    /* function testLeveragedSwaps() public {
+    function testLeveragedSwaps() public {
         vm.startPrank(User01);
-        USDC.approve(address(quid), 5 * stack);
-        quid.mint(User01, 5 * stack, address(USDC), 0);
+        USDC.approve(address(QUID), 5 * stack);
+        QUID.mint(User01, 50000 * WAD, address(USDC), 0);
         V4router.deposit{value: 25 ether}();
 
         // uint price = V4router.getPrice(0, false);
@@ -206,11 +205,31 @@ contract RouterTest is Test, Fixtures {
         // will not correspond to pool price
         // V4router.unwind(true, User01);
 
-        USDC.approve(address(quid), stack/10);
+        USDC.approve(address(QUID), stack/10);
         V4router.leverOneForZero(stack/10,
                             address(USDC));
 
         vm.stopPrank();
-    } */
+    }
 
+    function testRedeem() public {
+        vm.startPrank(User01);
+        USDC.approve(address(QUID), 5 * stack);
+        QUID.mint(User01, 50000 * WAD, address(USDC), 0);
+        uint USDCbalanceBefore = USDC.balanceOf(User01);
+       // amount hasn't matured yet,
+        // minimum 1 month maturity
+        V4router.redeem(1000 * WAD, address(QUID));
+        uint USDCbalanceAfter = USDC.balanceOf(User01);
+        assertApproxEqAbs(USDCbalanceAfter,
+                        USDCbalanceBefore, 1);
+        vm.warp(vm.getBlockTimestamp() + 30 days);
+        V4router.redeem(1000 * WAD, address(QUID));
+
+        USDCbalanceAfter = USDC.balanceOf(User01);
+        assertApproxEqAbs(USDCbalanceAfter -
+            USDCbalanceBefore, stack/10, 1);
+
+        vm.stopPrank();
+    }
 }

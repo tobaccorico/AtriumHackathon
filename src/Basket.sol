@@ -21,9 +21,9 @@ interface IStakeToken is IERC20 { // StkGHO (safety module)
     function redeem(address to, uint256 amount) external;
     // the amount param is in shares, not underlying...
     function claimRewards(address to, uint256 amount) external;
-    function previewStake(uint256 assets) 
+    function previewStake(uint256 assets)
              external view returns (uint256);
-    function previewRedeem(uint256 shares) 
+    function previewRedeem(uint256 shares)
              external view returns (uint256);
 }
 
@@ -77,9 +77,9 @@ contract Basket is
      * @dev Returns the current reading of our internal clock.
      */
     function currentMonth() public view returns
-        (uint month) { month = (block.timestamp - 
+        (uint month) { month = (block.timestamp -
                         _deployed) / 2420000; // ~28 days
-    } 
+    }
     /**
      * @dev Returns the name of our token.
      */
@@ -122,24 +122,13 @@ contract Basket is
         return true;
     }
 
-    function _til(uint when) 
-        internal view returns (uint til) {
-        uint current = currentMonth();
-        if (when == 0) { 
-            til = current + 1;
-        } else { 
-            til = Math.max(when,
-                    current + 1);
-            til = Math.min(when, 
-                    current + 33);
-        } 
-    }
-
     function matureBatches(uint[] memory batches)
-        public view returns (uint i) { 
-        for (i = batches.length; i > 0; --i) {
-            if (batches[i] <= currentMonth()) 
-                break;
+        public view returns (int i) {
+        int start = int(batches.length - 1);
+        for (i = start; i >= 0; i--) {
+            if (batches[uint(i)] <= currentMonth()) {
+                return i;
+            }
         }
     }
 
@@ -195,7 +184,7 @@ contract Basket is
             }
         } vault = vaults[stables[ghoIndex]]; 
         
-        shares = IStakeToken(vault).previewRedeem( 
+        shares = IStakeToken(vault).previewRedeem(
                  IStakeToken(vault).balanceOf(
                                 address(this))); 
 
@@ -210,15 +199,15 @@ contract Basket is
             uint total = amounts[0]; address vault;
             uint ghoIndex = stables.length;
             for (uint i = 1; i < ghoIndex; i++) {
-                uint divisor = i > 1 ? 1 : 1e12;
+                uint divisor = (i - 1) > 1 ? 1 : 1e12;
                 amounts[i] = FullMath.mulDiv(amount, FullMath.mulDiv(
                                         WAD, amounts[i], total), WAD);
                 amounts[i] /= divisor;
                 if (amounts[i] > 0) { vault = vaults[stables[i - 1]];
                     amounts[i] = withdraw(who, vault, amounts[i]);
-                    sent += amounts[i];
+                    sent += amounts[i] * divisor;
                 } 
-            } vault = vaults[stables[stables.length - 1]]; 
+            } vault = vaults[stables[stables.length - 1]];
             
             amounts[ghoIndex] = FullMath.mulDiv(amount, FullMath.mulDiv(
                                     WAD, amounts[ghoIndex], total), WAD);
@@ -229,10 +218,7 @@ contract Basket is
                 require(IStakeToken(vault).previewRedeem(amount) == amounts[ghoIndex], "sgho");
                 IStakeToken(vault).redeem(who, amount); sent += amounts[ghoIndex];
             }
-            // sent /= 1e12;
         } else { // TODO swap through Curve if we don't have enough of the token we need?
-            uint scale = 18 - IERC20(token).decimals();
-            amount = scale > 0 ? amount / (10 ** scale) : amount;
             return withdraw(who, vaults[token], amount);
         }
     }
@@ -294,7 +280,7 @@ contract Basket is
         uint256 id, uint256 amount
     ) internal override {
         _totalSupply += amount; 
-        totalSupplies[id] += amount; 
+        totalSupplies[id] += amount;
         perMonth[receiver].insert(id);
         
         totalBalances[receiver] += amount;
@@ -317,15 +303,16 @@ contract Basket is
      */
     function mint(address pledge, uint amount, 
         address token, uint when) public 
-        nonReentrant { uint month = _til(when);
+        nonReentrant { uint month = Math.max(when,
+                            currentMonth() + 1);
         if (token == address(this)) {
             require(msg.sender == V4, "403");
             _mint(pledge, month, amount);
         }
-        else { 
-            // uint cost = amount / 2; // TODO math
+        else { _mint(pledge, month, amount);
+            uint scale = 18 - IERC20(token).decimals();
+            amount /= scale > 0 ? 10 ** scale : 1;
             uint paid = deposit(pledge, token, amount);
-            _mint(pledge, month, amount);
             // Router(V4).mint(pledge, cost, amount);
         }
     }
@@ -346,11 +333,11 @@ contract Basket is
     }
 
     function turn(address from, // whose balance
-        uint value) public returns (uint) {
+        uint value) public returns (uint sent) {
         require(msg.sender == V4, "403");
         uint oldBalanceFrom = totalBalances[from];
-        uint sent = _transferHelper(
-        from, address(0), value);
+        sent = _transferHelper(from,
+                address(0), value);
         // carry.shares will be untouched here...
         // return Router(V4).transferHelper(from,
         //     address(0), sent, oldBalanceFrom);
@@ -370,41 +357,41 @@ contract Basket is
         // or exit with index out of bounds, both make sense...
         bool toZero = to == address(0);
         bool burning = toZero || to == V4;
-        int i = toZero ? 
-            int(matureBatches(batches)) :
+        int i = toZero ?
+            // this may return -1
+            matureBatches(batches) :
             int(batches.length - 1);
-            // if length is zero this
-            // may cause error code 11
-            // which is totally legal
-        while (amount > 0 && i >= 0) { 
+        while (amount > 0 && i >= 0) {
             uint k = batches[uint(i)];
             uint amt = balanceOf[from][k];
-            if (amt > 0) { 
+            if (amt > 0) {
                 amt = Math.min(amount, amt);
                 balanceOf[from][k] -= amt;
                 if (!burning) {
                     perMonth[to].insert(k);
                     balanceOf[to][k] += amt;
                 } else {
-                    totalSupplies[k] -= sent;
+                    totalSupplies[k] -= amt;
                 }
                 if (balanceOf[from][k] == 0) {
                     perMonth[from].remove(k);
                 }
                 amount -= amt; 
                 sent += amt;
-            }   i -= 1; 
-        } 
-        totalBalances[from] -= sent;
-        if (burning) {
-            _totalSupply -= sent;
-        } else {
-            totalBalances[to] += sent;
+            }   i -= 1;
+        }
+        if (sent > 0) {
+            totalBalances[from] -= sent;
+            if (burning) {
+                _totalSupply -= sent;
+            } else {
+                totalBalances[to] += sent;
+            }
         }
     }
 
     /**
-     * @dev A transfer which doesn't specifying the 
+     * @dev A transfer which doesn't specifying the
      * batch will proceed backwards from most recent
      * to oldest batch until the transfer amount is 
      * fulfilled entirely. Tokenholders that desire 
@@ -434,7 +421,7 @@ contract Basket is
             // _transfeHelper displaced the entire 
             // value from various maturities, to 
             // undo this perfectly would be too much
-            // work, so we just mint delta as current 
+            // work, so we just mint delta as current
             _mint(from, currentMonth() + 2, value);
             value = sent; // mint increases supply
         } 
