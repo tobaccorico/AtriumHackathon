@@ -48,10 +48,6 @@ contract RouterTest is Test, Fixtures {
     IERC20 public pxETH = IERC20(0x04C154b66CB340F3Ae24111CC767e0184Ed00Cc6); 
     
     address public aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
-    address public pirexETH = 0xD664b74274DfEB538d9baC494F3a4760828B02b0;
-    // (deposit ETH -> receive pxETH, instantRedeem pxETH -> receive ETH)
-    address public rexVault = 0x9Ba021B0a9b958B5E75cE9f6dff97C7eE52cb3E6;
-    // stake pxETH in ^^^^^ to auto-compound the ethereal staking yield
 
     address[] public STABLECOINS;
     IERC20 public GHO = IERC20(0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f);
@@ -64,6 +60,7 @@ contract RouterTest is Test, Fixtures {
     IERC20 public FRAX = IERC20(0xCAcd6fd266aF91b8AeD52aCCc382b4e165586E29);
     
     address[] public VAULTS;
+    IERC4626 public WETHvaultMEVcap = IERC4626(0x9a8bC3B04b7f3D87cfC09ba407dCED575f2d61D8);
     IERC4626 public gauntletUSDCvault = IERC4626(0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458);
     IERC4626 public steakhouseUSDTvault = IERC4626(0xbEef047a543E45807105E51A8BBEFCc5950fcfBa);
 
@@ -103,12 +100,10 @@ contract RouterTest is Test, Fixtures {
         vm.deal(address(this), 10000 ether);
         vm.deal(User01, 10000 ether);
         V4router = new Router(manager, 
-        address(V3pool), 
-        address(V3router),
-        pirexETH, address(pxETH), 
-        rexVault, aavePool); 
+        address(V3pool), address(V3router),
+        address(WETHvaultMEVcap), aavePool);
         QUID = new Basket(
-            address(V4router), 
+            address(V4router),
             STABLECOINS, VAULTS
         );
         vm.startPrank(0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341);
@@ -123,20 +118,23 @@ contract RouterTest is Test, Fixtures {
 
     function testBasics() public {
         uint USDCfee = 3 * USDC_PRECISION; // incl slippage
-        uint ETHfee = 6 * 1e15; // incl Dinero fee + ^^^^^ 
+        uint ETHfee = 6 * 1e15; // incl Dinero fee + ^^^^^
         
         vm.startPrank(User01);
         USDC.approve(address(QUID), 5 * stack);
         QUID.mint(User01, 50000 * WAD, address(USDC), 0);
 
-        V4router.deposit{value: 25 ether}(); // ADD LIQUIDITY TO POOL
+        V4router.deposit{value: 25 ether}(0); // ADD LIQUIDITY TO POOL
+        uint balanceBefore = User01.balance; // USDC.balanceOf(User01);
 
-        uint balanceBefore =  User01.balance; //USDC.balanceOf(User01);
-        uint id = V4router.outOfRange{value: 1 ether}(0, // TEST OUT OF RANGE
+        // TEST OUT OF RANGE
+        uint id = V4router.outOfRange{value: 1 ether}(0,
                                   address(0), 400, 100);
+
         // USDC.approve(address(QUID), stack / 10);
         /* uint id = V4router.outOfRange(stack / 10,
                         address(USDC), -4000, 100); */ // it works!
+
         uint balanceAfter = User01.balance; // USDC.balanceOf(User01);
         // assertApproxEqAbs(balanceBefore - balanceAfter, stack/10, 100);
         assertApproxEqAbs(balanceBefore - balanceAfter, 1 ether, 100);
@@ -188,7 +186,7 @@ contract RouterTest is Test, Fixtures {
         vm.startPrank(User01);
         USDC.approve(address(QUID), 5 * stack);
         QUID.mint(User01, 50000 * WAD, address(USDC), 0);
-        V4router.deposit{value: 25 ether}();
+        V4router.deposit{value: 25 ether}(0);
 
         address[] memory whose = new address[](1);
         whose[0] = User01;
@@ -218,13 +216,15 @@ contract RouterTest is Test, Fixtures {
         vm.startPrank(User01);
         USDC.approve(address(QUID), 5 * stack);
         QUID.mint(User01, 50000 * WAD, address(USDC), 0);
+
         uint USDCbalanceBefore = USDC.balanceOf(User01);
-       // amount hasn't matured yet,
-        // minimum 1 month maturity
+        // amount hasn't matured yet, min 1 month maturity
         V4router.redeem(1000 * WAD);
+
         uint USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter,
                         USDCbalanceBefore, 1);
+
         vm.warp(vm.getBlockTimestamp() + 30 days);
         V4router.redeem(1000 * WAD);
 

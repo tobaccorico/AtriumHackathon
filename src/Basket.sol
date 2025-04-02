@@ -60,7 +60,7 @@ contract Basket is ERC6909 {
     mapping(address => mapping(// legacy IERC20 version
             address => uint256)) private _allowances;
 
-    modifier onlyUs { 
+    modifier onlyUs {
         address sender = msg.sender;
         require(sender == V4 ||
                 sender == address(this), "!?"); _;
@@ -223,7 +223,10 @@ contract Basket is ERC6909 {
             require(IStakeToken(vault).previewRedeem(amount) == amounts[ghoIndex], "sgho");
             IStakeToken(vault).redeem(who, amount); sent += amounts[ghoIndex];
         }
-    }
+    }  // TODO bonds come with specific redemption features. For example, they can be callable,
+    // whereby the issuer has the right to redeem, or call back the bond prior to its maturity,
+    // or puttable, where bondholders have the right to sell their bonds back to the issuer at
+    // a predetermined price.
 
     function withdraw(address to, address vault, uint amount) internal returns (uint sent) {
         uint sharesWithdrawn = Math.min(IERC4626(vault).balanceOf(address(this)),
@@ -288,7 +291,7 @@ contract Basket is ERC6909 {
         totalBalances[receiver] += amount;
         balanceOf[receiver][id] += amount;
 
-        emit Transfer(msg.sender, 
+        emit Transfer(msg.sender,
             address(0), receiver,
             id, amount);
     }
@@ -308,12 +311,14 @@ contract Basket is ERC6909 {
             _mint(pledge, month, amount);
         } else {
             uint scale = 18 - IERC20(token).decimals();
-            uint depositing = scale > 0 ?
-            amount / (10 ** scale) : amount;
+            uint depositing = scale > 0 ? amount /
+                            (10 ** scale) : amount;
+
             uint paid = deposit(pledge, token, depositing);
             (uint total, uint yield) = get_metrics(false);
             amount += FullMath.mulDiv(amount * yield,
-                month - currentMonth(), WAD * 12);
+                    month - currentMonth(), WAD * 12);
+
             _mint(pledge, month, amount);
         }
     }
