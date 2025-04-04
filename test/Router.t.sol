@@ -21,8 +21,8 @@ import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 // import {HookFee} from "../src/examples/HookFee.sol";
 
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {IUniswapV3Pool} from "../src/imports/V3/IUniswapV3Pool.sol";
-import {ISwapRouter} from "../src/imports/V3/ISwapRouter.sol";
+import {IUniswapV3Pool} from "../src/imports/v3/IUniswapV3Pool.sol";
+import {ISwapRouter} from "../src/imports/v3/ISwapRouter.sol";
 // import {IV3SwapRouter as ISwapRouter} from "../src/imports/V3/IV3SwapRouter.sol";
 
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";

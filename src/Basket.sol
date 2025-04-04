@@ -196,6 +196,10 @@ contract Basket is ERC6909 {
                 amount -= withdraw(who, vault,
                         perVault[vault].cash);
 
+                // TODO if USDC and needed for unwind 
+                // must sell
+
+                //
                 uint scale = 18 - IERC20(token).decimals();
                 amount *= scale > 0 ? 10 ** scale : 1;
             }

@@ -5,11 +5,10 @@ pragma solidity ^0.8.24;
 import {Basket} from "./Basket.sol";
 import {mockToken} from "./mockToken.sol";
 
-
 import {WETH as WETH9} from "solmate/src/tokens/WETH.sol";
-import {IUniswapV3Pool} from "./imports/V3/IUniswapV3Pool.sol";
-import {ISwapRouter} from "./imports/V3/ISwapRouter.sol"; // on L1 and Arbitrum
-// import {IV3SwapRouter as ISwapRouter} from "./imports/IV3SwapRouter.sol"; // base
+import {IUniswapV3Pool} from "./imports/v3/IUniswapV3Pool.sol";
+import {ISwapRouter} from "./imports/v3/ISwapRouter.sol"; // on L1 and Arbitrum
+// import {IV3SwapRouter as ISwapRouter} from "./imports/v3/IV3SwapRouter.sol"; // base
 
 import {IPool} from "aave-v3/interfaces/IPool.sol";
 import {FlashLoanReceiverBase} from "aave-v3/misc/flashloan/base/FlashLoanReceiverBase.sol";
@@ -204,9 +203,6 @@ contract Router is SafeCallback, Ownable {
                         address(USDC), true);
     }
 
-    // the protocol is net long, keeping 1ETH on deposit,
-    // while levering dollar value of 1ETH to go short:
-    // borrowing 70% on AAVE, then selling that for USDC
     function leverZeroForOne() public payable {
         uint borrowing = msg.value * 7 / 10;
         uint buffer = msg.value - borrowing;
@@ -329,7 +325,7 @@ contract Router is SafeCallback, Ownable {
             poolManager.unlock(abi.encode(
                 Action.OutsideRange, msg.sender, liquidity,
                 tickLower, tickUpper)), (BalanceDelta));
-                uint ethBalance = address(this).balance;
+                
     }
 
     function reclaim(uint id, int percent) external {
@@ -355,9 +351,9 @@ contract Router is SafeCallback, Ownable {
             abi.encode(Action.OutsideRange, msg.sender,
             -liquidity, position.lower, position.upper)),
             (BalanceDelta));
-    }
-
-    function redeem(uint amount) external {
+    } 
+    function redeem(uint amount) external { // TODO add caps
+        // to not exceed matureWhen(batch) for maximum -- ^
         require(amount >= WAD, "will round down to nothing");
         amount = QUID.turn(msg.sender, amount);
         (uint total, ) = QUID.get_metrics(false);
@@ -369,12 +365,13 @@ contract Router is SafeCallback, Ownable {
         }
     }
 
-    // it's legal to call this with amount 0
-    // or even type(uint256).max to fully exit
+    // TODO spread over time for huge withdraws
     function withdraw(uint amount) external
-        returns (BalanceDelta delta) {
-        Deposit memory LP = autoManaged[msg.sender];
+        returns (BalanceDelta delta) { 
+        Deposit memory LP = autoManaged[msg.sender]; 
         uint eth_fees = ETH_FEES; uint usd_fees = USD_FEES;
+        // swap fee yield, which uses ^^^^^^^^^^ to buy into unwind
+        // instead of V3, which doesn't get more than half, future
         uint pending = PENDING_ETH; uint pooled_eth = POOLED_ETH;
         uint fees_eth = FullMath.mulDiv((eth_fees - LP.fees_eth),
                                       LP.pooled_eth, pooled_eth);
@@ -700,6 +697,7 @@ contract Router is SafeCallback, Ownable {
         withdrawn = wethVault.redeem(amount, address(this), address(this));
     }   fallback() external payable {} // redeem triggers this
 
+    
     function unwindZeroForOne(address[] calldata whose) external {
         viaAAVE memory pledge; uint buffer; uint reUP;
         (uint160 sqrtPriceX96,,,,,,) = v3Pool.slot0();
