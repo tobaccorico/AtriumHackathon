@@ -29,6 +29,7 @@ import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 
 import {Fixtures} from "./utils/Fixtures.sol";
+import {Auxiliary} from "../src/Auxiliary.sol";
 import {Router} from "../src/Router.sol";
 import {Basket} from "../src/Basket.sol";
 
@@ -45,11 +46,9 @@ contract RouterTest is Test, Fixtures {
 
     ISwapRouter public V3router = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
     IUniswapV3Pool public V3pool = IUniswapV3Pool(0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640);
-    IERC20 public pxETH = IERC20(0x04C154b66CB340F3Ae24111CC767e0184Ed00Cc6); 
     
-    address public aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
-
     address[] public STABLECOINS;
+    address public aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
     IERC20 public GHO = IERC20(0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f);
     IERC20 public USDT = IERC20(0xdAC17F958D2ee523a2206206994597C13D831ec7);
     IERC20 public USDC = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
@@ -64,7 +63,7 @@ contract RouterTest is Test, Fixtures {
     IERC4626 public gauntletUSDCvault = IERC4626(0x8eB67A509616cd6A7c1B3c8C21D48FF57df3d458);
     IERC4626 public steakhouseUSDTvault = IERC4626(0xbEef047a543E45807105E51A8BBEFCc5950fcfBa);
 
-    // unlike other vaults, SGHO has special interface (similar to ERC4626)
+    // unlike other vaults, SGHO has its own interface (similar to ERC4626)
     IERC20 public SGHO = IERC20(0x1a88Df1cFe15Af22B3c4c783D4e6F7F9e0C1885d);
     IERC4626 public SDAI = IERC4626(0x83F20F44975D03b1b09e64809B757c47f942BEeA);
     IERC4626 public SFRAX = IERC4626(0xcf62F905562626CfcDD2261162a51fd02Fc9c5b6);
@@ -72,9 +71,9 @@ contract RouterTest is Test, Fixtures {
     IERC4626 public SUSDE = IERC4626(0x9D39A5DE30e57443BfF2A8307A4256c8797A3497);
     IERC4626 public SCRVUSD = IERC4626(0x0655977FEb2f289A4aB78af67BAB0d17aAb84367);
 
-    address[] public CURVES;
-
-    Basket public QUID; Router public V4router;
+    Basket public QUID;
+    Auxiliary public AUX;
+    Router public V4router;
     uint stack = 10000 * USDC_PRECISION;
     function setUp() public {
         STABLECOINS = [
@@ -92,82 +91,88 @@ contract RouterTest is Test, Fixtures {
         ];
         uint mainnetFork = vm.createFork(
             "https://ethereum-rpc.publicnode.com",
-            22095900); vm.selectFork(mainnetFork);
+            22202383); vm.selectFork(mainnetFork);
         
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
         deployAndApprovePosm(manager); 
+        
         vm.deal(address(this), 10000 ether);
         vm.deal(User01, 10000 ether);
-        V4router = new Router(manager, 
-        address(V3pool), address(V3router),
-        address(WETHvaultMEVcap), aavePool);
-        QUID = new Basket(
-            address(V4router),
-            STABLECOINS, VAULTS
-        );
+        
+        V4router = new Router(manager);
+        AUX = new Auxiliary(address(V4router),
+            address(V3pool), address(V3router),
+            address(WETHvaultMEVcap), aavePool);
+        QUID = new Basket(address(V4router),
+            address(AUX), STABLECOINS, VAULTS);
+
         vm.startPrank(0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341);
         USDC.transfer(address(this), 1 * USDC_PRECISION);
         USDC.transfer(User01, 1000000 * USDC_PRECISION); 
         vm.stopPrank();
+        
         // the following transfer is necessary for setQuid()
-        USDC.transfer(address(V4router), 1 * USDC_PRECISION);
-        V4router.setQuid{value: 1 wei}(address(QUID));
+        USDC.transfer(address(AUX), 1 * USDC_PRECISION);
+        V4router.setup(address(QUID),
+        address(AUX), address(V3pool));
+        AUX.setQuid{value: 1 wei}(address(QUID));   
     }
 
 
     function testBasics() public {
-        uint USDCfee = 3 * USDC_PRECISION; // incl slippage
+        uint USDCfee = 6 * USDC_PRECISION; // incl slippage
         uint ETHfee = 6 * 1e15; // incl Dinero fee + ^^^^^
         
         vm.startPrank(User01);
         USDC.approve(address(QUID), 5 * stack);
         QUID.mint(User01, 50000 * WAD, address(USDC), 0);
 
-        V4router.deposit{value: 25 ether}(0); // ADD LIQUIDITY TO POOL
+        AUX.deposit{value: 25 ether}(0); // ADD LIQUIDITY TO POOL
         uint balanceBefore = User01.balance; // USDC.balanceOf(User01);
 
-        // TEST OUT OF RANGE
-        uint id = V4router.outOfRange{value: 1 ether}(0,
-                                  address(0), 400, 100);
+        // TEST OUT OF RANGE with ETH (above price)
+        uint id = AUX.outOfRange{value: 1 ether}(0,
+                            address(0), 400, 100);
 
         // USDC.approve(address(QUID), stack / 10);
-        /* uint id = V4router.outOfRange(stack / 10,
-                        address(USDC), -4000, 100); */ // it works!
+        /* uint id = AUX.outOfRange(stack / 10,
+                        address(USDC), -4000, 100); */ // below price with USDC works!
 
         uint balanceAfter = User01.balance; // USDC.balanceOf(User01);
         // assertApproxEqAbs(balanceBefore - balanceAfter, stack/10, 100);
         assertApproxEqAbs(balanceBefore - balanceAfter, 1 ether, 100);
 
-        V4router.reclaim(id, 100);
+        AUX.reclaim(id, 100);
 
         balanceAfter = User01.balance; // USDC.balanceOf(User01)
         assertApproxEqAbs(balanceBefore, balanceAfter, 6 * 1e14);
 
-        uint price = V4router.getPrice(0, false);
+        uint price = AUX.getPrice(0, false);
         uint expectingToBuy = price / 1e12;
+        console.log("expectingToBuy", expectingToBuy);
         uint USDCbalanceBefore = USDC.balanceOf(User01);
 
-        V4router.swap{value: 1 ether}(address(USDC), false, 0);
+        AUX.swap{value: 1 ether}(address(USDC), false, 0);
 
         uint USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter - USDCbalanceBefore, 
                                 expectingToBuy, USDCfee);
 
-        price = V4router.getPrice(0, false);
+        price = AUX.getPrice(0, false);
         balanceBefore = User01.balance;
         // note, we're not approving the router!
         USDC.approve(address(QUID), price / 1e12); 
         // but Basket, because QUID does transferFrom
 
-        V4router.swap(address(USDC), true, price / 1e12);
+        AUX.swap(address(USDC), true, price / 1e12);
 
         balanceAfter = User01.balance;
         assertApproxEqAbs(balanceAfter - balanceBefore, 1 ether, ETHfee);
 
         USDCbalanceBefore = USDC.balanceOf(User01);
         
-        V4router.swap{value: 100 ether}(address(USDC), false, 0);
+        AUX.swap{value: 100 ether}(address(USDC), false, 0);
         
         expectingToBuy = 100 ether * price / 1e30;
 
@@ -186,28 +191,28 @@ contract RouterTest is Test, Fixtures {
         vm.startPrank(User01);
         USDC.approve(address(QUID), 5 * stack);
         QUID.mint(User01, 50000 * WAD, address(USDC), 0);
-        V4router.deposit{value: 25 ether}(0);
+        AUX.deposit{value: 25 ether}(0);
 
         address[] memory whose = new address[](1);
         whose[0] = User01;
 
-        // uint price = V4router.getPrice(0, false);
+        // uint price = AUX.getPrice(0, false);
         // uint expectingToBuy = price * 1 ether;
         // expectingToBuy += expectingToBuy / 25;
         // ^ leveraged swaps give a boosted gain
 
-        V4router.leverZeroForOne{value: 1 ether}();
+        AUX.leverZeroForOne{value: 1 ether}();
 
         // Simulate spike in price
-        // V4router.set_price_eth(true);
+        // AUX.set_price_eth(true);
 
         // WE will get "Too little received"
         // because the simulated price spike
         // will not correspond to pool price
-        // V4router.unwindZeroForOne(whose);
+        // AUX.unwindZeroForOne(whose);
 
         USDC.approve(address(QUID), stack / 10);
-        V4router.leverOneForZero(stack / 10,
+        AUX.leverOneForZero(stack / 10,
                             address(USDC));
         vm.stopPrank();
     }
@@ -219,14 +224,14 @@ contract RouterTest is Test, Fixtures {
 
         uint USDCbalanceBefore = USDC.balanceOf(User01);
         // amount hasn't matured yet, min 1 month maturity
-        V4router.redeem(1000 * WAD);
+        AUX.redeem(1000 * WAD);
 
         uint USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter,
                         USDCbalanceBefore, 1);
 
         vm.warp(vm.getBlockTimestamp() + 30 days);
-        V4router.redeem(1000 * WAD);
+        AUX.redeem(1000 * WAD);
 
         USDCbalanceAfter = USDC.balanceOf(User01);
         assertApproxEqAbs(USDCbalanceAfter -

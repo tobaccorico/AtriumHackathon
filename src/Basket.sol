@@ -43,6 +43,7 @@ contract Basket is ERC6909 {
     string private _name = "QU!D";
     string private _symbol = "QD";
     address payable public V4;
+    address public AUX; // TODO immutable
 
     struct Metrics {
         uint last; uint total; uint yield;
@@ -63,7 +64,7 @@ contract Basket is ERC6909 {
     modifier onlyUs {
         address sender = msg.sender;
         require(sender == V4 ||
-                sender == address(this), "!?"); _;
+                sender == AUX, "403"); _;
     }
 
     /**
@@ -125,10 +126,9 @@ contract Basket is ERC6909 {
         }
     }
 
-    constructor(address _router,
-        address[] memory _stables, 
-        address[] memory _vaults) { 
-        _deployed = block.timestamp;
+    constructor(address _router, address _auxiliary,
+        address[] memory _stables, address[] memory _vaults) { 
+        _deployed = block.timestamp; AUX = _auxiliary;
         require(_stables.length == _vaults.length, "align"); 
         address stable; address vault; stables = _stables;
         for (uint i = 0; i < _vaults.length; i++) {
@@ -311,7 +311,7 @@ contract Basket is ERC6909 {
         uint month = Math.max(when,
             currentMonth() + 1);
         if (token == address(this)) {
-            require(msg.sender == V4, "403");
+            require(msg.sender == AUX, "403");
             _mint(pledge, month, amount);
         } else {
             uint scale = 18 - IERC20(token).decimals();
@@ -343,8 +343,7 @@ contract Basket is ERC6909 {
     }
 
     function turn(address from, // whose balance
-        uint value) public returns (uint sent) {
-        require(msg.sender == V4, "403");
+        uint value) onlyUs public returns (uint sent) {
         uint oldBalanceFrom = totalBalances[from];
         sent = _transferHelper(from,
                 address(0), value);
